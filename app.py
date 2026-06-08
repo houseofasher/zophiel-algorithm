@@ -6,11 +6,17 @@ Runs a Flask REST API wrapping the full Zophiel pipeline:
   GET  /health   -> { "status": "ok", "docs": <corpus size> }
   GET  /         -> API info
 
+Web search fallback system:
+  - RAG confidence < 0.35  → auto Wikipedia + web search
+  - News/current-events query → Google News RSS headlines
+  - AUREON_WEB_SEARCH=1    → force web search on all queries
+
 Environment variables (all optional):
-  PORT                 HTTP port  (default: 8080)
-  DB_PATH              Path to SQLite corpus  (default: data/aureon.db)
-  KNOWLEDGE_PATH       Path to corpus_knowledge.json  (default: data/corpus_knowledge.json)
-  AUREON_WEB_SEARCH    Set to "1" to enable live DuckDuckGo search (auto-on for news queries)
+  PORT              HTTP port (default: 8080)
+  DB_PATH           Path to SQLite corpus (default: data/aureon.db)
+  KNOWLEDGE_PATH    Path to corpus_knowledge.json (default: data/corpus_knowledge.json)
+  AUREON_WEB_SEARCH Set to "1" to force web search on every query
+  RAG_CONFIDENCE    Minimum RAG score before fallback triggers (default: 0.35)
 """
 
 import os, sys, json, sqlite3, re
@@ -20,12 +26,15 @@ from flask import Flask, request, jsonify
 BASE = Path(__file__).resolve().parent
 DB   = os.environ.get("DB_PATH",        str(BASE / "data" / "aureon.db"))
 KNOW = os.environ.get("KNOWLEDGE_PATH", str(BASE / "data" / "corpus_knowledge.json"))
+RAG_MIN_CONFIDENCE = float(os.environ.get("RAG_CONFIDENCE", "0.35"))
 sys.path.insert(0, str(BASE))
 
 from aureon_test_runner import RagIndex, fast_answer, asher_decode, synthesize, build_corpus
 from cyber_defence import analyse_threat
 
-# --- Startup: always rebuild corpus from JSON so db is never stale/malformed ---
+# ---------------------------------------------------------------------------
+# Startup: always rebuild corpus from JSON so db is never stale/malformed
+# ---------------------------------------------------------------------------
 print(f"[Zophiel] Building corpus from {KNOW} ...")
 try:
     with open(KNOW, encoding="utf-8") as f:
@@ -43,8 +52,10 @@ print(f"[Zophiel] Ready — {len(INDEX._docs)} documents indexed")
 
 app = Flask(__name__)
 
-# --- Current-events / news query detector ---
-_NEWS_SIGNALS = re.compile(
+# ---------------------------------------------------------------------------
+# Query classifiers
+# ---------------------------------------------------------------------------
+_NEWS_RE = re.compile(
     r"\b(today|right now|currently|latest|recent|news|happening|2024|2025|2026|"
     r"this week|this year|just announced|new release|just dropped|trending|"
     r"what.s going on|what is going on|whats happening)\b",
@@ -52,15 +63,86 @@ _NEWS_SIGNALS = re.compile(
 )
 
 def _is_news_query(q: str) -> bool:
-    return bool(_NEWS_SIGNALS.search(q))
+    return bool(_NEWS_RE.search(q))
 
+def _corpus_confidence(hits: list) -> float:
+    """Return the best TF-IDF score from a hit list, or 0.0."""
+    if not hits:
+        return 0.0
+    scores = [h.get("score", 0.0) if isinstance(h, dict) else 0.0 for h in hits]
+    return max(scores)
 
-def _live_search(query: str) -> list[dict]:
-    """Google News RSS fetch — real headlines, no API key required."""
-    import urllib.request, urllib.parse, re as _re
+# ---------------------------------------------------------------------------
+# Web search functions
+# ---------------------------------------------------------------------------
+import urllib.request, urllib.parse as _urlparse
+
+def _wikipedia_search(query: str) -> list[dict]:
+    """Search Wikipedia — fetch top 3 articles, score sentences by query overlap."""
     hits = []
     try:
-        params = urllib.parse.urlencode({
+        # Step 1: get top 3 matching article titles
+        params = _urlparse.urlencode({
+            "action": "query", "list": "search",
+            "srsearch": query, "format": "json", "srlimit": 3,
+        })
+        req = urllib.request.Request(
+            f"https://en.wikipedia.org/w/api.php?{params}",
+            headers={"User-Agent": "Zophiel/SOLIA 1.0 (educational)"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+        results = data.get("query", {}).get("search", [])
+        if not results:
+            return hits
+
+        titles = "|".join(r["title"] for r in results)
+        query_words = set(re.findall(r"[a-z]{3,}", query.lower()))
+
+        # Step 2: fetch all 3 article intros in one API call
+        params2 = _urlparse.urlencode({
+            "action": "query", "titles": titles,
+            "prop": "extracts", "exintro": "1", "explaintext": "1",
+            "format": "json",
+        })
+        req2 = urllib.request.Request(
+            f"https://en.wikipedia.org/w/api.php?{params2}",
+            headers={"User-Agent": "Zophiel/SOLIA 1.0 (educational)"},
+        )
+        with urllib.request.urlopen(req2, timeout=8) as resp2:
+            data2 = json.loads(resp2.read().decode())
+
+        # Step 3: score every sentence by overlap with query words
+        candidates: list[tuple[float, str, str]] = []
+        for page in data2.get("query", {}).get("pages", {}).values():
+            title = page.get("title", "wikipedia")
+            extract = page.get("extract", "").strip()
+            if not extract:
+                continue
+            sentences = re.split(r"(?<=[.!?])\s+", extract)
+            for sent in sentences[:20]:
+                sent = sent.strip()
+                if len(sent) < 40:
+                    continue
+                sent_words = set(re.findall(r"[a-z]{3,}", sent.lower()))
+                overlap = len(query_words & sent_words) / max(1, len(query_words))
+                candidates.append((overlap, sent, title))
+
+        # Take top 8 sentences by overlap score
+        candidates.sort(key=lambda x: -x[0])
+        for score, sent, title in candidates[:8]:
+            hits.append({"text": sent, "score": 0.85 + score * 0.1,
+                          "source": f"wikipedia:{title}"})
+    except Exception as ex:
+        print(f"[Zophiel] wikipedia_search error: {ex}")
+    return hits
+
+
+def _news_search(query: str) -> list[dict]:
+    """Google News RSS — returns live headlines."""
+    hits = []
+    try:
+        params = _urlparse.urlencode({
             "q": query, "hl": "en-US", "gl": "US", "ceid": "US:en",
         })
         req = urllib.request.Request(
@@ -69,34 +151,72 @@ def _live_search(query: str) -> list[dict]:
         )
         with urllib.request.urlopen(req, timeout=8) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
-
-        for item in _re.findall(r"<item>(.*?)</item>", raw, _re.DOTALL)[:8]:
-            title_m = _re.search(r"<title>(.*?)</title>", item)
-            if not title_m:
+        for item in re.findall(r"<item>(.*?)</item>", raw, re.DOTALL)[:8]:
+            tm = re.search(r"<title>(.*?)</title>", item)
+            if not tm:
                 continue
-            title = title_m.group(1).strip()
-            title = _re.sub(r"&amp;", "&", title)
-            title = _re.sub(r"&lt;", "<", title)
-            title = _re.sub(r"&gt;", ">", title)
-            title = _re.sub(r"&#\d+;", "", title)
-            # strip "- Source Name" suffix for cleaner synthesis
-            title = _re.sub(r"\s+-\s+[^-]{3,50}$", "", title).strip()
+            title = tm.group(1).strip()
+            title = re.sub(r"&amp;", "&", title)
+            title = re.sub(r"&lt;", "<", title)
+            title = re.sub(r"&gt;", ">", title)
+            title = re.sub(r"&#\d+;", "", title)
+            title = re.sub(r"\s+-\s+[^-]{3,50}$", "", title).strip()
             if len(title) > 20:
                 hits.append({"text": title, "score": 0.85, "source": "google-news"})
     except Exception as ex:
-        print(f"[Zophiel] live_search error: {ex}")
+        print(f"[Zophiel] news_search error: {ex}")
     return hits
 
 
+def _web_fallback(query: str) -> tuple[list[dict], str]:
+    """
+    Full internet fallback. Returns (hits, source_label).
+    Tries Wikipedia first (factual), then Google News (current events).
+    """
+    wiki_hits = _wikipedia_search(query)
+    if wiki_hits:
+        return wiki_hits, "wikipedia"
+    news_hits = _news_search(query)
+    return news_hits, "google-news"
+
+
+# ---------------------------------------------------------------------------
+# Reply builders
+# ---------------------------------------------------------------------------
+def _build_news_reply(query: str, live_hits: list, corpus_hits: list, decode: str) -> str:
+    headlines = [h["text"] for h in live_hits[:6]]
+    reply = "Here is what is happening right now:\n"
+    reply += "\n".join(f"  • {h}" for h in headlines)
+    if decode:
+        reply += f"\n\nAsher Pattern: {decode}"
+    corpus_reply = synthesize(query, corpus_hits, asher_extra="")
+    if corpus_reply:
+        reply += f"\n\nContext from corpus: {corpus_reply}"
+    return reply
+
+
+def _build_web_reply(query: str, web_hits: list, decode: str, source: str) -> str:
+    reply = synthesize(query, web_hits, asher_extra=decode or "")
+    if not reply:
+        # synthesize filtered everything — fallback to raw text join
+        texts = [h["text"] for h in web_hits[:4] if isinstance(h, dict)]
+        reply = " ".join(texts)
+    return reply
+
+
+# ---------------------------------------------------------------------------
+# Flask routes
+# ---------------------------------------------------------------------------
 @app.route("/")
 def root():
     return jsonify({
         "name":       "Zophiel / SOLIA AI Engine",
-        "version":    "1.0.0",
+        "version":    "1.1.0",
         "author":     "Aureon Software",
         "routes":     {"POST /ask": "query the AI", "GET /health": "status check"},
         "docs":       len(INDEX._docs),
         "web_search": True,
+        "rag_confidence_threshold": RAG_MIN_CONFIDENCE,
     })
 
 
@@ -126,49 +246,55 @@ def ask():
     # 2. Cyber defence overlay
     cyber = analyse_threat(query)
 
-    # 3. Live web search — auto-on for news queries OR if AUREON_WEB_SEARCH=1
-    use_web = _is_news_query(query) or os.environ.get("AUREON_WEB_SEARCH") == "1"
-    live_hits = _live_search(query) if use_web else []
-
-    # 4. RAG retrieval (blend live + corpus)
-    corpus_hits = INDEX.query(query, top_k=8)
-    hits = (live_hits + corpus_hits) if live_hits else corpus_hits
-
-    # 5. Asher decode
+    # 3. Asher decode
     decode = asher_decode(query)
 
-    # 6. Synthesize
-    if live_hits:
-        # News-mode: lead with live headlines, append corpus context
-        headlines = [h["text"] for h in live_hits[:6]]
-        corpus_texts = [h["text"] if isinstance(h, dict) else h
-                        for h in corpus_hits[:3]]
-        reply = "Here is what is happening right now:\n"
-        reply += "\n".join(f"  • {h}" for h in headlines)
-        if decode:
-            reply += f"\n\nAsher Pattern: {decode}"
-        if corpus_texts:
-            ctx = synthesize(query, corpus_hits, asher_extra="")
-            if ctx:
-                reply += f"\n\nContext from corpus: {ctx}"
+    # 4. RAG retrieval — always run to check confidence
+    corpus_hits = INDEX.query(query, top_k=8)
+    confidence  = _corpus_confidence(corpus_hits)
+
+    web_hits   = []
+    web_source = ""
+    method_parts = []
+
+    # 5. Route: news query → Google News headlines
+    if _is_news_query(query) or os.environ.get("AUREON_WEB_SEARCH") == "1":
+        web_hits = _news_search(query)
+        web_source = "google-news"
+        reply = _build_news_reply(query, web_hits, corpus_hits, decode)
+        method_parts = ["live_search", "rag", "synthesize"]
+
+    # 6. Route: low-confidence corpus → Wikipedia + web fallback
+    elif confidence < RAG_MIN_CONFIDENCE:
+        web_hits, web_source = _web_fallback(query)
+        if web_hits:
+            reply = _build_web_reply(query, web_hits, decode, web_source)
+            method_parts = [f"web_fallback({web_source})", "synthesize"]
+            if decode:
+                method_parts.insert(1, "asher_decode")
+        else:
+            # Web also returned nothing — use corpus anyway
+            reply = synthesize(query, corpus_hits, asher_extra=decode or "")
+            method_parts = ["rag", "synthesize"]
+
+    # 7. Route: confident corpus answer
     else:
-        reply = synthesize(query, hits, asher_extra=decode or "")
+        reply = synthesize(query, corpus_hits, asher_extra=decode or "")
+        method_parts = ["rag", "synthesize"]
+        if decode:
+            method_parts.insert(1, "asher_decode")
+
     if cyber:
         reply = cyber + "  " + reply
-
-    method_parts = []
-    if live_hits:  method_parts.append("live_search")
-    method_parts.append("rag")
-    if decode:     method_parts.append("asher_decode")
-    if cyber:      method_parts.append("cyber_defence")
-    method_parts.append("synthesize")
+        method_parts.append("cyber_defence")
 
     return jsonify({
         "reply":       reply,
         "method":      "+".join(method_parts),
-        "hits":        len(hits),
-        "live_hits":   len(live_hits),
-        "cyber":       cyber,
+        "confidence":  round(confidence, 3),
+        "corpus_hits": len(corpus_hits),
+        "web_hits":    len(web_hits),
+        "web_source":  web_source,
         "asher":       decode,
     })
 
