@@ -1,0 +1,46 @@
+{
+  "name": "nomad-cyber-algorithm",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZorakCorp/nomad_cyber_algorithm.git"
+  },
+  "version": "1.0.0",
+  "description": "Quantum-resistant microservice communication demo in TypeScript using Kyber768 (KEM) and Dilithium3 (SIG).",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "start:sovereign": "node dist/sovereign_main.js",
+    "test": "npm run build && node dist/tests/run_all.js",
+    "test:protocol": "npm run build && node dist/tests/protocol.test.js",
+    "test:fuzz": "npm run build && node dist/tests/fuzz.test.js",
+    "test:audit": "npm run build && node dist/tests/dependency_audit.test.js",
+    "test:battle": "npm run build && node dist/tests/battle.test.js",
+    "sidecar": "npm run build && node dist/sidecar_main.js",
+    "verify:deps": "npm run build && node dist/startup/verify_deps.js",
+    "generate:sbom": "npm run build && node dist/scripts/generate_sbom.js",
+    "key:ceremony": "npm run build && node dist/scripts/key_ceremony.js"
+  },
+  "keywords": [
+    "quantum-safe",
+    "post-quantum-cryptography",
+    "kyber",
+    "dilithium",
+    "typescript",
+    "cybersecurity",
+    "microservice"
+  ],
+  "author": "Aureon ZALI Design Lab",
+  "license": "MIT",
+  "dependencies": {
+    "@noble/curves": "^1.8.1",
+    "@open-quantum-safe/oqs-javascript": "file:vendor/oqs-javascript",
+    "@simplewebauthn/server": "^13.1.1",
+    "@types/node": "^20.14.9",
+    "argon2": "^0.43.0",
+    "ioredis": "^5.4.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.3"
+  }
+}

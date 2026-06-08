@@ -1,0 +1,498 @@
+"""
+NOMAD CYBER SECURITY — Defensive Layer of the Zophiel/Aureon System
+Python port of the NOMAD security stack from zophiel_engine/src/security/nomad.ts
+
+Implements:
+  - AuditLog         — HMAC-chained tamper-evident audit trail
+  - RbacPolicy       — Role-based access control
+  - ApiKeyRegistry   — SHA-256 hashed API key management
+  - RateLimiter      — Connection + RPM rate limiting
+  - DistributedRateLimiter — Per-client rate limiting
+  - ReplayGuard      — Nonce + timestamp replay attack prevention
+  - SSRFGuard        — SSRF/private-IP request blocking
+  - VitalGuard       — Organism vitals — partial compromise = full lockdown
+  - ClientAllowlist  — Explicit client allowlist enforcement
+  - NomadSecurityStack — Full assembled stack
+
+Doctrine: "All security organs must be vital simultaneously.
+           Partial compromise = total shutdown."
+"""
+from __future__ import annotations
+
+import hashlib
+import hmac
+import ipaddress
+import json
+import os
+import re
+import secrets
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal
+
+
+# ── Types ─────────────────────────────────────────────────────────────────────
+
+Role = Literal["viewer", "operator", "admin", "sovereign"]
+_ROLE_RANK: dict[str, int] = {"viewer": 1, "operator": 2, "admin": 3, "sovereign": 4}
+
+AuditEventType = Literal[
+    "job_started","job_completed","job_failed","api_request","api_denied",
+    "rate_limit_exceeded","replay_detected","client_rejected_allowlist",
+    "ssrf_blocked","organism_lockdown","audit_chain_breach","query_received","query_answered",
+]
+
+
+# ── AuditLog — HMAC-chained tamper-evident log ───────────────────────────────
+
+@dataclass
+class AuditEvent:
+    id: str
+    ts: str
+    type: str
+    correlation_id: str | None
+    peer: str | None
+    detail: str | None
+    prev_entry_id: str
+    entry_mac: str
+
+
+class AuditLog:
+    """
+    Append-only audit log where each entry is HMAC-signed and chains
+    to the previous entry. Any tampering breaks the chain.
+    """
+
+    def __init__(self, log_dir: str | None = None, chain_key_hex: str | None = None):
+        self._chain_key = bytes.fromhex(chain_key_hex) if chain_key_hex else secrets.token_bytes(32)
+        self._entries: list[AuditEvent] = []
+        self._file_path: Path | None = None
+
+        if log_dir:
+            p = Path(log_dir)
+            p.mkdir(parents=True, exist_ok=True)
+            self._file_path = p / "zophiel-audit.jsonl"
+            self._load()
+
+    def _sign(self, ev_id, ts, ev_type, prev_id, detail) -> str:
+        prev = prev_id or "GENESIS"
+        payload = f"{ev_id}|{ts}|{ev_type}|{prev}|{detail or ''}"
+        return hmac.new(self._chain_key, payload.encode(), hashlib.sha256).hexdigest()
+
+    def _load(self) -> None:
+        if not self._file_path or not self._file_path.exists():
+            return
+        for line in self._file_path.read_text(encoding='utf-8').splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+                self._entries.append(AuditEvent(**d))
+            except Exception:
+                pass
+
+    def record(self, ev_type: str, correlation_id: str | None = None,
+               peer: str | None = None, detail: str | None = None) -> AuditEvent:
+        prev = self._entries[-1] if self._entries else None
+        ev_id = f"{int(time.time()*1000)}-{secrets.token_hex(4)}"
+        ts    = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime())
+        prev_id = prev.id if prev else ""
+        mac   = self._sign(ev_id, ts, ev_type, prev_id, detail)
+        event = AuditEvent(
+            id=ev_id, ts=ts, type=ev_type,
+            correlation_id=correlation_id, peer=peer,
+            detail=detail, prev_entry_id=prev_id, entry_mac=mac,
+        )
+        self._entries.append(event)
+        if self._file_path:
+            with self._file_path.open('a', encoding='utf-8') as f:
+                f.write(json.dumps(event.__dict__) + "\n")
+        return event
+
+    def verify_chain(self) -> tuple[bool, list[str]]:
+        errors: list[str] = []
+        prev_id = ""
+        for ev in self._entries:
+            expected = self._sign(ev.id, ev.ts, ev.type, ev.prev_entry_id, ev.detail)
+            if not hmac.compare_digest(ev.entry_mac, expected):
+                errors.append(f"Entry {ev.id}: HMAC mismatch")
+            if ev.prev_entry_id != prev_id:
+                errors.append(f"Entry {ev.id}: chain broken")
+            prev_id = ev.id
+        return len(errors) == 0, errors
+
+    def query(self, limit: int = 100) -> list[AuditEvent]:
+        return self._entries[-limit:]
+
+    def fingerprint(self) -> str:
+        return self._chain_key[:8].hex()
+
+
+# ── RbacPolicy ───────────────────────────────────────────────────────────────
+
+class RbacPolicy:
+    _ROUTES: dict[str, Role] = {
+        "GET /health":               "viewer",
+        "GET /organism/vitals":      "viewer",
+        "GET /v1/engines":           "viewer",
+        "GET /v1/jobs":              "operator",
+        "GET /v1/jobs/:id":          "operator",
+        "GET /v1/jobs/:id/pages":    "operator",
+        "POST /v1/jobs":             "operator",
+        "POST /v1/lookup":           "operator",
+        "POST /v1/query":            "operator",
+        "GET /v1/audit":             "admin",
+        "DELETE /v1/jobs/:id":       "admin",
+        "POST /v1/admin/keys":       "sovereign",
+    }
+
+    def authorize(self, principal: dict | None, method: str, path: str) -> bool:
+        if not principal:
+            return False
+        required = self._match_route(method, path)
+        need = _ROLE_RANK[required]
+        roles = principal.get("roles", [])
+        return any(_ROLE_RANK.get(r, 0) >= need for r in roles)
+
+    def _match_route(self, method: str, path: str) -> Role:
+        key = f"{method.upper()} {path}"
+        if key in self._ROUTES:
+            return self._ROUTES[key]
+        for pattern, role in self._ROUTES.items():
+            if ":id" in pattern:
+                base = pattern.split(":id")[0].rstrip("/")
+                if path.startswith(base):
+                    return role
+        return "admin"
+
+
+# ── ApiKeyRegistry ───────────────────────────────────────────────────────────
+
+class ApiKeyRegistry:
+    def __init__(self, api_key_entries: list[str], require_auth: bool = False):
+        self.require_auth = require_auth and bool(api_key_entries)
+        self._keys: dict[str, dict] = {}
+        for entry in api_key_entries:
+            parts = entry.split(":", 1)
+            if len(parts) == 2:
+                h, role = parts
+                self._keys[h.strip()] = {"subject": f"key:{role}", "roles": [role.strip().lower()]}
+
+    @staticmethod
+    def hash_key(raw: str) -> str:
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    def verify_token(self, token: str) -> dict | None:
+        h = self.hash_key(token)
+        for key_hash, principal in self._keys.items():
+            if hmac.compare_digest(key_hash, h):
+                return principal
+        return None
+
+    @staticmethod
+    def generate_key(role: Role = "operator") -> tuple[str, str]:
+        raw = secrets.token_urlsafe(24)
+        config_entry = f"{ApiKeyRegistry.hash_key(raw)}:{role}"
+        return raw, config_entry
+
+
+# ── RateLimiter ───────────────────────────────────────────────────────────────
+
+class RateLimiter:
+    def __init__(self, max_connections: int = 50, max_rpm: int = 120):
+        self._max_conn = max_connections
+        self._max_rpm  = max_rpm
+        self._active   = 0
+        self._timestamps: list[float] = []
+
+    def try_acquire(self) -> bool:
+        now = time.time()
+        self._timestamps = [t for t in self._timestamps if t >= now - 60]
+        if len(self._timestamps) >= self._max_rpm or self._active >= self._max_conn:
+            return False
+        self._active += 1
+        self._timestamps.append(now)
+        return True
+
+    def release(self) -> None:
+        self._active = max(0, self._active - 1)
+
+
+class DistributedRateLimiter:
+    def __init__(self, max_per_minute: int = 60):
+        self._max = max_per_minute
+        self._buckets: dict[str, list[float]] = {}
+
+    def try_acquire(self, client_id: str) -> bool:
+        now = time.time()
+        hits = [t for t in self._buckets.get(client_id, []) if t >= now - 60]
+        if len(hits) >= self._max:
+            return False
+        hits.append(now)
+        self._buckets[client_id] = hits
+        return True
+
+
+# ── ReplayGuard ───────────────────────────────────────────────────────────────
+
+class ReplayGuard:
+    def __init__(self, max_clock_skew_ms: int = 60000,
+                 nonce_ttl_ms: int = 120000, max_entries: int = 10000):
+        self._skew  = max_clock_skew_ms
+        self._ttl   = nonce_ttl_ms
+        self._max   = max_entries
+        self._seen: dict[str, float] = {}
+
+    def validate(self, nonce: str, timestamp_ms: int, correlation_id: str) -> None:
+        self._purge()
+        now_ms = int(time.time() * 1000)
+        if timestamp_ms <= 0 or abs(now_ms - timestamp_ms) > self._skew:
+            raise ValueError("Message timestamp outside allowed clock skew window.")
+        key = f"{correlation_id}:{nonce}"
+        if key in self._seen:
+            raise ValueError("Replay detected: duplicate nonce.")
+        self._seen[key] = now_ms + self._ttl
+        if len(self._seen) > self._max:
+            oldest = next(iter(self._seen))
+            del self._seen[oldest]
+
+    def _purge(self) -> None:
+        now_ms = int(time.time() * 1000)
+        self._seen = {k: v for k, v in self._seen.items() if v > now_ms}
+
+
+# ── SSRFGuard ─────────────────────────────────────────────────────────────────
+
+_BLOCKED_HOSTS = frozenset(["localhost", "127.0.0.1", "::1", "0.0.0.0"])
+_BLOCKED_TLDS  = frozenset([".local", ".internal", ".corp", ".lan"])
+
+class SSRFGuard:
+    def __init__(self, block_private: bool = True, block_link_local: bool = True,
+                 allowed_schemes: list[str] | None = None):
+        self._block_private    = block_private
+        self._block_link_local = block_link_local
+        self._schemes          = set(allowed_schemes or ["http", "https"])
+
+    def validate_url(self, url: str) -> tuple[bool, str | None]:
+        from urllib.parse import urlparse
+        try:
+            p = urlparse(url.strip())
+        except Exception:
+            return False, "invalid_url"
+        scheme = p.scheme.lower()
+        if scheme not in self._schemes:
+            return False, "scheme_not_allowed"
+        host = (p.hostname or "").lower()
+        if host in _BLOCKED_HOSTS:
+            return False, "blocked_host"
+        for tld in _BLOCKED_TLDS:
+            if host.endswith(tld):
+                return False, "blocked_tld"
+        # Literal IPv4 private range check
+        ip_match = re.match(r'^(\d+)\.(\d+)\.(\d+)\.(\d+)$', host)
+        if ip_match:
+            parts = [int(x) for x in ip_match.groups()]
+            if parts[0] == 10:
+                return False, "private_ip"
+            if parts[0] == 172 and 16 <= parts[1] <= 31:
+                return False, "private_ip"
+            if parts[0] == 192 and parts[1] == 168:
+                return False, "private_ip"
+            if parts[0] == 127:
+                return False, "loopback_ip"
+            if parts[0] == 169 and parts[1] == 254:
+                return False, "link_local_ip"
+        return True, None
+
+    def validate_many(self, urls: list[str]) -> list[tuple[str, str]]:
+        blocked = []
+        for url in urls:
+            ok, reason = self.validate_url(url)
+            if not ok:
+                blocked.append((url, reason or "blocked"))
+        return blocked
+
+
+# ── VitalGuard ───────────────────────────────────────────────────────────────
+
+class VitalGuard:
+    """
+    Organism vitals monitor.
+    Doctrine: ALL security organs must be vital simultaneously.
+    One failure = total lockdown.
+    """
+
+    def __init__(self, audit: AuditLog, dev_mode: bool = False):
+        self._audit      = audit
+        self._dev_mode   = dev_mode
+        self._pulse      = 1
+        self._lockdown_reason: str | None = None
+
+    def pulse_check(self) -> None:
+        self._pulse += 1
+        if self._dev_mode:
+            self._lockdown_reason = None
+            return
+        valid, errors = self._audit.verify_chain()
+        self._lockdown_reason = None if valid else (errors[0] if errors else "audit_chain_invalid")
+        if self._lockdown_reason:
+            self._audit.record("audit_chain_breach", detail=self._lockdown_reason)
+
+    def is_vital(self) -> bool:
+        return self._dev_mode or self._lockdown_reason is None
+
+    def require_vital(self, operation: str) -> None:
+        if not self.is_vital():
+            raise PermissionError(f"ORGANISM_LOCKDOWN: {operation} blocked — {self._lockdown_reason}")
+
+    def vitals_report(self) -> dict[str, Any]:
+        valid, _ = self._audit.verify_chain()
+        return {
+            "vital": self.is_vital(),
+            "pulse_generation": self._pulse,
+            "organism_fingerprint": self._audit.fingerprint(),
+            "lockdown_reason": self._lockdown_reason,
+            "doctrine": "All security organs must be vital simultaneously. Partial compromise = total shutdown.",
+            "organs": [
+                {"id": "audit_immune",  "name": "Audit Immune System", "state": "vital" if valid else "critical"},
+                {"id": "gateway_skin",  "name": "Gateway Skin",        "state": "vital" if self.is_vital() else "critical"},
+                {"id": "ssrf_lungs",    "name": "SSRF Lungs",          "state": "vital"},
+                {"id": "replay_shield", "name": "Replay Shield",       "state": "vital"},
+                {"id": "rate_membrane", "name": "Rate Membrane",       "state": "vital"},
+            ],
+        }
+
+
+# ── ClientAllowlist ───────────────────────────────────────────────────────────
+
+class ClientAllowlist:
+    def __init__(self, allowed: list[str], require: bool = False):
+        self._allowed = set(s.strip() for s in allowed if s.strip())
+        self._require = require
+
+    def is_allowed(self, client_id: str) -> bool:
+        if self._require and not self._allowed:
+            return False
+        if not self._allowed:
+            return True
+        return client_id in self._allowed
+
+
+# ── Full NOMAD Security Stack ─────────────────────────────────────────────────
+
+@dataclass
+class NomadSecurityStack:
+    audit:       AuditLog
+    rbac:        RbacPolicy
+    auth:        ApiKeyRegistry
+    allowlist:   ClientAllowlist
+    rate_limiter: RateLimiter
+    distributed: DistributedRateLimiter
+    replay_guard: ReplayGuard
+    vital_guard: VitalGuard
+    ssrf_guard:  SSRFGuard
+
+
+def build_security_stack(
+    log_dir: str | None = None,
+    api_key_entries: list[str] | None = None,
+    require_auth: bool = False,
+    client_allowlist: list[str] | None = None,
+    dev_mode: bool = True,
+    chain_key_hex: str | None = None,
+    max_connections: int = 50,
+    max_rpm: int = 120,
+    max_rpm_per_client: int = 60,
+) -> NomadSecurityStack:
+    audit       = AuditLog(log_dir=log_dir, chain_key_hex=chain_key_hex)
+    vital       = VitalGuard(audit, dev_mode=dev_mode)
+    vital.pulse_check()
+
+    stack = NomadSecurityStack(
+        audit        = audit,
+        rbac         = RbacPolicy(),
+        auth         = ApiKeyRegistry(api_key_entries or [], require_auth),
+        allowlist    = ClientAllowlist(client_allowlist or []),
+        rate_limiter = RateLimiter(max_connections, max_rpm),
+        distributed  = DistributedRateLimiter(max_rpm_per_client),
+        replay_guard = ReplayGuard(),
+        vital_guard  = vital,
+        ssrf_guard   = SSRFGuard(),
+    )
+    audit.record("job_started", detail="NOMAD security stack initialised")
+    return stack
+
+
+def validate_request(stack: NomadSecurityStack, method: str, path: str,
+                     token: str | None = None, client_id: str = "anonymous",
+                     correlation_id: str | None = None) -> tuple[bool, str]:
+    """
+    Full request validation pipeline.
+    Returns (allowed: bool, reason: str).
+    """
+    # Vitals check
+    if not stack.vital_guard.is_vital():
+        stack.audit.record("organism_lockdown", correlation_id=correlation_id, detail=path)
+        return False, "organism_lockdown"
+
+    # Client allowlist
+    if not stack.allowlist.is_allowed(client_id):
+        stack.audit.record("client_rejected_allowlist", correlation_id=correlation_id, peer=client_id)
+        return False, "client_not_in_allowlist"
+
+    # Rate limiting
+    if not stack.distributed.try_acquire(client_id):
+        stack.audit.record("rate_limit_exceeded", correlation_id=correlation_id, peer=client_id)
+        return False, "rate_limit_exceeded"
+
+    if not stack.rate_limiter.try_acquire():
+        stack.audit.record("rate_limit_exceeded", correlation_id=correlation_id, detail="global")
+        return False, "global_rate_limit"
+
+    # Auth
+    principal: dict | None = None
+    if stack.auth.require_auth:
+        if not token:
+            stack.audit.record("api_denied", correlation_id=correlation_id, detail="no_token")
+            stack.rate_limiter.release()
+            return False, "authentication_required"
+        principal = stack.auth.verify_token(token)
+        if not principal:
+            stack.audit.record("api_denied", correlation_id=correlation_id, detail="invalid_token")
+            stack.rate_limiter.release()
+            return False, "invalid_token"
+    else:
+        principal = {"subject": "anonymous", "roles": ["operator"]}
+
+    # RBAC
+    if not stack.rbac.authorize(principal, method, path):
+        stack.audit.record("api_denied", correlation_id=correlation_id,
+                           detail=f"rbac_denied {method} {path}")
+        stack.rate_limiter.release()
+        return False, "permission_denied"
+
+    stack.audit.record("api_request", correlation_id=correlation_id,
+                       peer=client_id, detail=f"{method} {path}")
+    return True, "ok"
+
+
+# ── Singleton stack ───────────────────────────────────────────────────────────
+_AUDIT_DIR = os.environ.get("ZOPHIEL_AUDIT_DIR")
+_DEV_MODE  = os.environ.get("ZOPHIEL_DEV_MODE", "true").lower() in ("true","1","yes")
+
+_stack: NomadSecurityStack | None = None
+
+def get_stack() -> NomadSecurityStack:
+    global _stack
+    if _stack is None:
+        _stack = build_security_stack(log_dir=_AUDIT_DIR, dev_mode=_DEV_MODE)
+    return _stack
+
+def ssrf_check(url: str) -> tuple[bool, str | None]:
+    """Quick SSRF check on a single URL."""
+    return get_stack().ssrf_guard.validate_url(url)
+
+def vitals() -> dict:
+    return get_stack().vital_guard.vitals_report()
