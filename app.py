@@ -385,6 +385,20 @@ def ask():
     if fast:
         return jsonify({"reply": fast, "method": "fast_path"})
 
+    # 1b. Narrative Forge — code submitted for review/audit/rebuild. Stateful: the
+    # approval gate persists per session (x-session-id header), and phase 6 forging
+    # uses the optional writer model when configured.
+    try:
+        from brain.narrative_forge import process as _forge_process
+        _sid = (request.headers.get("x-session-id")
+                or request.headers.get("x-forwarded-for", "")
+                or request.remote_addr or "_default").split(",")[0].strip()
+        forged = _forge_process(query, session_id=_sid, forge_fn=_forge_with_writer)
+        if forged:
+            return jsonify({"reply": forged["reply"], "method": forged["method"]})
+    except Exception:
+        pass
+
     # 2. Code generation
     try:
         from brain.code_engine import generate_code
@@ -461,6 +475,25 @@ def ask():
         "web_source":  web_source,
         "asher":       decode,
     })
+
+
+def _forge_with_writer(code: str, fix_narrative: str) -> str:
+    """Phase 6 of Narrative Forge: rewrite code applying the approved fixes, using
+    the optional writer model. Returns '' when no model is configured so the forge
+    falls back to the deterministic repair plan."""
+    try:
+        from brain.mind.rag_writer import llm_available, write_answer
+        if not llm_available():
+            return ""
+        prompt = (
+            "Rewrite the following code so it applies these approved fixes exactly, "
+            "changing nothing else and preserving its original purpose:\n\n"
+            f"FIXES:\n{fix_narrative}\n\nORIGINAL CODE:\n{code}"
+        )
+        text, method = write_answer(prompt, [fix_narrative, code], "")
+        return text if "llm" in method else ""
+    except Exception:
+        return ""
 
 
 def _chunk_text(text: str, max_chunks: int = 400) -> list[str]:

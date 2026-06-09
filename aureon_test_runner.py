@@ -1394,6 +1394,17 @@ def think(query: str, index: RagIndex) -> dict:
     if convo:
         return {"reply": convo, "method": "conversational", "hits": 0}
 
+    # Narrative Forge — code submitted for review/audit/rebuild. Treats code as a
+    # story: translate -> comprehend -> audit (logic/narrative/security) -> rebuild
+    # -> approval gate. Runs BEFORE the code generator, which writes new code.
+    try:
+        from brain.narrative_forge import process as _forge_process
+        forged = _forge_process(q, session_id=None)
+        if forged:
+            return {"reply": forged["reply"], "method": forged["method"], "hits": 0}
+    except Exception:
+        pass
+
     # Code generation path
     try:
         from brain.code_engine import generate_code
