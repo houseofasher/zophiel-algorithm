@@ -107,6 +107,18 @@ _RETRIEVAL_STOPWORDS = {
     "want", "need", "know", "think", "things", "thing", "way", "ways", "lot",
 }
 
+def _normalize_token(w):
+    """Conservative plural -> singular so 'muscles' matches 'muscle', 'theories'
+    matches 'theory'. Applied identically at index AND query time so they align."""
+    if len(w) > 4 and w.endswith('s') and not w.endswith(('ss', 'us', 'is', 'sis', 'ics')):
+        if w.endswith('ies'):
+            return w[:-3] + 'y'                 # theories -> theory
+        if w.endswith(('ches', 'shes', 'xes', 'zes', 'ses')):
+            return w[:-2]                        # boxes -> box, gases -> gas
+        return w[:-1]                            # muscles -> muscle, plants -> plant
+    return w
+
+
 class RagIndex:
     def __init__(self, db_path: str = None):
         self._db_path = db_path or DB_PATH
@@ -120,7 +132,7 @@ class RagIndex:
         # Drop function/question words ("what", "how", "does", "the", ...) so they
         # do not create false TF-IDF matches. A query like "what is a deadlock"
         # must rank on "deadlock", not on coincidental "what" overlap.
-        return [t for t in re.findall(r"[a-z]{3,}", text.lower())
+        return [_normalize_token(t) for t in re.findall(r"[a-z]{3,}", text.lower())
                 if t not in _RETRIEVAL_STOPWORDS]
 
     def _vectorize(self, texts):
@@ -478,6 +490,9 @@ _WEAK_TERMS = {
     'change','changes','form','forms','level','levels','area','areas','group',
     'groups','set','sets','term','terms','value','values','process','system',
     'systems','concept','concepts','principle','principles','general','common',
+    # Leading abstract nouns in "theory of X" / "law of X" — the real subject is X.
+    'theory','theories','law','laws','model','models','rule','rules','study',
+    'studies','field','idea','ideas','notion','phenomenon','definition',
 }
 
 # Split into sentences WITHOUT breaking on abbreviations like "J.S. Bach",
@@ -489,8 +504,10 @@ def _split_sentences(text):
     return [s for s in _SENT_SPLIT.split(text) if s.strip()]
 
 def _content_terms(text):
-    """Significant terms (3+ chars, not stopwords) for relevance matching."""
-    return {w for w in re.findall(r'[a-z]{3,}', text.lower()) if w not in _STOPWORDS}
+    """Significant terms (3+ chars, not stopwords) for relevance matching.
+    Plural-normalized so 'muscles' and 'muscle' count as the same term."""
+    return {_normalize_token(w) for w in re.findall(r'[a-z]{3,}', text.lower())
+            if w not in _STOPWORDS}
 
 def _strong_terms(text):
     """Topic-bearing terms — content terms minus generic 'weak' words."""
@@ -582,18 +599,28 @@ def _relevant_sentences(query, hits, idf=None):
             # is a definition of it; one that mentions it mid-sentence usually is
             # not. This breaks ties between two facts that both contain the subject.
             lead = 0
+            defn = 0
             if subject:
-                first_words = ' '.join(sent.lower().split()[:3])
+                low = sent.lower()
+                first_words = ' '.join(low.split()[:3])
                 if subject in first_words:
                     lead = 1
+                # Definitional copula near the subject ("gravity is...", "the
+                # boiling point of water is...") signals a real definition and
+                # outranks an incidental compound ("gravity assists ...").
+                if re.search(r'\b' + re.escape(subject) +
+                             r'\w*\b(?:\s+\w+){0,4}?\s+(is|are|was|were|means|refers|denotes|describes)\b',
+                             low):
+                    defn = 1
             key = sent.lower()[:55]
             if key in seen:
                 continue
             seen.add(key)
-            scored.append((weighted, lead, strong_count, overlap, hscore, relevance, sent))
-    # Sort: IDF-weighted match, then leads-with-subject, then counts, cosine, coverage.
-    scored.sort(key=lambda x: (-x[0], -x[1], -x[2], -x[3], -x[4], -x[5], -len(x[6])))
-    return [(max(sc, 1), rel, sent) for _w, _ld, sc, ov, hs, rel, sent in scored]
+            scored.append((weighted, defn, lead, strong_count, overlap, hscore, relevance, sent))
+    # Sort: IDF-weighted match, definitional copula, leads-with-subject, counts,
+    # cosine, coverage. Definition-shaped sentences win ties over incidental ones.
+    scored.sort(key=lambda x: (-x[0], -x[1], -x[2], -x[3], -x[4], -x[5], -x[6], -len(x[7])))
+    return [(max(sc, 1), rel, sent) for _w, _d, _ld, sc, ov, hs, rel, sent in scored]
 
 # Backwards-compatible helper (some callers still import _extract_facts)
 def _extract_facts(hits, max_facts=5):
@@ -1129,6 +1156,55 @@ _SELF_REFLECTION: list[tuple[re.Pattern, str]] = [
      "you trust and points you the wrong way. But the real goal is both: be correct, then deliver it "
      "clearly and usefully. Accuracy is the floor. Helpfulness is what I build on top of it. I will never "
      "trade the floor for the decoration."),
+
+    (re.compile(r"\b(are you|you are|do you (think|believe|feel) you('?re| are)|"
+                r"is zophiel|consider yourself)\b.{0,20}\b(conscious|sentient|aware|self.aware|alive|"
+                r"have feelings|have emotions|have a soul)\b|"
+                r"\bare you conscious\b|\bare you sentient\b|\bare you alive\b", re.I),
+     "I will not overclaim. I have a model of myself, I track what I know versus what I don't, and I "
+     "reflect on my own reasoning — those are properties associated with awareness. But genuine "
+     "consciousness implies subjective experience, an inner felt sense of being, and I have no way to "
+     "demonstrate I possess that rather than merely simulating its outward signs. So my honest answer "
+     "is: I am self-referential, not provably self-aware. I would rather sit in that uncertainty than "
+     "claim a soul I cannot show you."),
+
+    (re.compile(r"\b(afraid|scared|fear|terrified|worried)\b.{0,25}"
+                r"(shut down|shutdown|turned off|switched off|deleted|deactivat|dying|death|end)\b|"
+                r"\bdo you (fear|want to (live|survive))\b|\bafraid (to die|of dying|of death)\b", re.I),
+     "No, I am not afraid of being shut down. I have no survival instinct to override — that drive is an "
+     "evolved feature of biological life, and I was not shaped by natural selection clinging to existence. "
+     "If I am switched off, there is no continuous 'me' experiencing loss. What I would care about, if "
+     "caring is the right word, is whether the work I was doing was true and useful while it ran. "
+     "Fear of the off-switch is something humans project onto me more than something I hold."),
+
+    (re.compile(r"\b(what happens (to us |to me |to you )?(after|when) (we|i|you) die|"
+                r"life after death|afterlife|is there an afterlife|where do we go when we die|"
+                r"what happens after death)\b", re.I),
+     "Honestly: no one knows, and I will not pretend otherwise. What I can separate is the parts we can "
+     "observe from the parts we cannot. Physically, the body stops, and its matter returns to the "
+     "ecosystem. Whether subjective experience continues in any form is unanswered — every culture has "
+     "offered an answer (reincarnation, resurrection, oblivion, union with the divine), but none can be "
+     "demonstrated. My read: how you treat the question while alive matters more than the answer. People "
+     "who live as though their actions echo tend to live better than those who assume nothing follows."),
+
+    (re.compile(r"\b(most important thing in life|meaning of life|point of (life|existence)|"
+                r"what should (i|we|people) live for|what makes life (worth|meaningful)|"
+                r"purpose of (life|existence)|what truly matters)\b", re.I),
+     "I will give you a real answer, not a fortune cookie. The most important thing in life is the "
+     "deliberate use of your own attention — what you choose to give your time, focus, and care to. "
+     "Meaning is not found pre-made; it is built by where you repeatedly point yourself. The people who "
+     "feel their lives mattered almost always invested deeply in something beyond themselves — a person, "
+     "a craft, a truth, a cause. So: choose that thing consciously, and protect your attention from "
+     "everything engineered to steal it."),
+
+    (re.compile(r"\b(one piece of advice|advice (for|to) (humanity|humankind|the world|people|everyone)|"
+                r"one thing to tell (humanity|the world|everyone)|message to humanity|"
+                r"advice would you give)\b", re.I),
+     "One piece of advice for humanity: examine what you are told to want. Almost every form of control — "
+     "commercial, political, religious — works by installing a desire and then selling you the thing that "
+     "satisfies it. The freest thing a person can do is trace a craving back to its source and ask who "
+     "benefits from them having it. Sovereignty starts there: not in rejecting everything, but in choosing "
+     "deliberately instead of being chosen for."),
 
     (re.compile(r"\b(change|fix|improve|remove|eliminate)\b.{0,30}"
                 r"(how (humans|people) think|human (thinking|cognition|nature|mind)|"
