@@ -1367,12 +1367,26 @@ def think(query: str, index: RagIndex) -> dict:
     hits = index.query(q, top_k=20)
     idf = index.term_idf_map(q)
 
-    # Synthesize (IDF-weighted so rare subject words outrank common ones)
+    # Synthesize (IDF-weighted so rare subject words outrank common ones).
+    # This is the grounded librarian answer — always produced.
     answer = synthesize(q, hits, asher_extra=asher or "", idf=idf)
+    method = "rag+synthesize" + ("+asher" if asher else "")
+
+    # Optional writer layer: if a real language model is configured, hand the
+    # SAME retrieved facts to it to compose an original, grounded answer instead
+    # of stitching quotes. Off by default — no key means pure retrieval, unchanged.
+    try:
+        from brain.mind.rag_writer import llm_available, write_answer
+        if llm_available():
+            facts = [s for _sc, _rel, s in _relevant_sentences(q, hits, idf=idf)[:6]]
+            if facts:
+                answer, method = write_answer(q, facts, answer)
+    except Exception:
+        pass  # writer is strictly additive; never let it break retrieval
 
     return {
         "reply": answer,
-        "method": "rag+synthesize" + ("+asher" if asher else ""),
+        "method": method,
         "hits": len(hits),
         "top_source": hits[0]["source"] if hits else "none",
         "top_score": hits[0]["score"] if hits else 0.0,

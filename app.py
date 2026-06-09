@@ -425,6 +425,20 @@ def ask():
         method_parts = ["rag", "synthesize"]
         if decode:
             method_parts.insert(1, "asher_decode")
+        # Optional writer layer: if a language model is configured, let it compose
+        # an original answer grounded ONLY in the retrieved corpus facts. The
+        # deterministic synthesis above is the fallback when no model is present.
+        try:
+            from brain.mind.rag_writer import llm_available, write_answer
+            if llm_available():
+                from aureon_test_runner import _relevant_sentences
+                facts = [s for _sc, _rel, s in _relevant_sentences(query, corpus_hits)[:6]]
+                if facts:
+                    reply, _m = write_answer(query, facts, reply)
+                    if "llm" in _m:
+                        method_parts = ["rag", "llm_writer"]
+        except Exception:
+            pass
 
     if cyber:
         reply = cyber + "  " + reply
