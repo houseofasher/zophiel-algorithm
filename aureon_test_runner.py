@@ -168,21 +168,178 @@ _CONSTANTS = {
 }
 _MATH_RE = re.compile(r'(?:what\s+is\s+)?([0-9\s\+\-\*\/\(\)\^\.]+ ?)(?:=\s*\?|equals?\??)?\??$', re.I)
 
+# Extended math patterns
+_PCT_RE      = re.compile(r'(\d+(?:\.\d+)?)\s*(?:percent|%)\s+of\s+(\d+(?:[.,]\d+)?)', re.I)
+_WORD_OP_RE  = re.compile(
+    r'(\d+(?:\.\d+)?)\s+(plus|added to|minus|subtracted from|times|multiplied by|divided by|mod(?:ulo)?)\s+(\d+(?:\.\d+)?)',
+    re.I)
+_POWER_RE    = re.compile(
+    r'(\d+(?:\.\d+)?)\s+(?:to\s+the\s+(?:power\s+(?:of\s+)?)?|raised\s+to\s+(?:the\s+)?(?:power\s+(?:of\s+)?)?)(\d+(?:\.\d+)?)',
+    re.I)
+_SQUARED_RE  = re.compile(r'(\d+(?:\.\d+)?)\s+squared', re.I)
+_CUBED_RE    = re.compile(r'(\d+(?:\.\d+)?)\s+cubed', re.I)
+_SQRT_RE     = re.compile(r'square\s+root\s+of\s+(\d+(?:\.\d+)?)', re.I)
+_CBRT_RE     = re.compile(r'cube\s+root\s+of\s+(\d+(?:\.\d+)?)', re.I)
+
+# Unit conversion — order-independent: match "number + source unit", then confirm
+# the target unit is mentioned anywhere in the query. Handles both
+# "convert 60 miles to km" and "how many km is 60 miles".
+# Each entry: (value+source-unit regex, target-unit regex, formatter)
+_CONVERSIONS = [
+    (re.compile(r'(\d+(?:\.\d+)?)\s*(?:degrees?\s*)?(?:fahrenheit|°f)\b', re.I),
+     re.compile(r'\b(celsius|centigrade|°c)\b', re.I),
+     lambda v: f"{_fmt(v)}°F = {_fmt((v-32)*5/9)}°C"),
+    (re.compile(r'(\d+(?:\.\d+)?)\s*(?:degrees?\s*)?(?:celsius|centigrade|°c)\b', re.I),
+     re.compile(r'\b(fahrenheit|°f)\b', re.I),
+     lambda v: f"{_fmt(v)}°C = {_fmt(v*9/5+32)}°F"),
+    (re.compile(r'(\d+(?:\.\d+)?)\s*(?:degrees?\s*)?(?:celsius|centigrade|°c)\b', re.I),
+     re.compile(r'\bkelvin\b', re.I),
+     lambda v: f"{_fmt(v)}°C = {_fmt(v+273.15)} K"),
+    (re.compile(r'(\d+(?:\.\d+)?)\s*kelvin\b', re.I),
+     re.compile(r'\b(celsius|centigrade|°c)\b', re.I),
+     lambda v: f"{_fmt(v)} K = {_fmt(v-273.15)}°C"),
+    (re.compile(r'(\d+(?:\.\d+)?)\s*(?:km|kilometers?|kilometres?)\b', re.I),
+     re.compile(r'\b(miles?|mi)\b', re.I),
+     lambda v: f"{_fmt(v)} km = {_fmt(v*0.621371)} miles"),
+    (re.compile(r'(\d+(?:\.\d+)?)\s*(?:miles?|mi)\b', re.I),
+     re.compile(r'\b(km|kilometers?|kilometres?)\b', re.I),
+     lambda v: f"{_fmt(v)} miles = {_fmt(v*1.60934)} km"),
+    (re.compile(r'(\d+(?:\.\d+)?)\s*(?:kg|kilograms?)\b', re.I),
+     re.compile(r'\b(pounds?|lbs?)\b', re.I),
+     lambda v: f"{_fmt(v)} kg = {_fmt(v*2.20462)} lbs"),
+    (re.compile(r'(\d+(?:\.\d+)?)\s*(?:pounds?|lbs?)\b', re.I),
+     re.compile(r'\b(kg|kilograms?)\b', re.I),
+     lambda v: f"{_fmt(v)} lbs = {_fmt(v*0.453592)} kg"),
+    (re.compile(r'(\d+(?:\.\d+)?)\s*(?:meters?|metres?)\b', re.I),
+     re.compile(r'\b(feet|foot|ft)\b', re.I),
+     lambda v: f"{_fmt(v)} m = {_fmt(v*3.28084)} ft"),
+    (re.compile(r'(\d+(?:\.\d+)?)\s*(?:feet|foot|ft)\b', re.I),
+     re.compile(r'\b(meters?|metres?)\b', re.I),
+     lambda v: f"{_fmt(v)} ft = {_fmt(v*0.3048)} m"),
+    (re.compile(r'(\d+(?:\.\d+)?)\s*(?:cm|centimeters?|centimetres?)\b', re.I),
+     re.compile(r'\b(inch(?:es)?|in)\b', re.I),
+     lambda v: f"{_fmt(v)} cm = {_fmt(v*0.393701)} inches"),
+    (re.compile(r'(\d+(?:\.\d+)?)\s*(?:inch(?:es)?)\b', re.I),
+     re.compile(r'\b(cm|centimeters?|centimetres?)\b', re.I),
+     lambda v: f"{_fmt(v)} inches = {_fmt(v*2.54)} cm"),
+    (re.compile(r'(\d+(?:\.\d+)?)\s*(?:liters?|litres?)\b', re.I),
+     re.compile(r'\b(gallons?|gal)\b', re.I),
+     lambda v: f"{_fmt(v)} litres = {_fmt(v*0.264172)} gallons"),
+    (re.compile(r'(\d+(?:\.\d+)?)\s*(?:gallons?|gal)\b', re.I),
+     re.compile(r'\b(liters?|litres?)\b', re.I),
+     lambda v: f"{_fmt(v)} gallons = {_fmt(v*3.78541)} litres"),
+    (re.compile(r'(\d+(?:\.\d+)?)\s*(?:mph|miles?\s+per\s+hour)\b', re.I),
+     re.compile(r'\b(kph|km/h|kilometers?\s+per\s+hour)\b', re.I),
+     lambda v: f"{_fmt(v)} mph = {_fmt(v*1.60934)} kph"),
+    (re.compile(r'(\d+(?:\.\d+)?)\s*(?:kph|km/h|kilometers?\s+per\s+hour)\b', re.I),
+     re.compile(r'\b(mph|miles?\s+per\s+hour)\b', re.I),
+     lambda v: f"{_fmt(v)} kph = {_fmt(v*0.621371)} mph"),
+]
+
+
+def _fmt(n: float) -> str:
+    """Format a float cleanly: drop trailing zeros, round at 6 decimal places."""
+    return f"{n:,.6f}".rstrip("0").rstrip(".")
+
+
 def fast_answer(query):
     q = query.strip().lower()
+
+    # Physical constants
     for name, value in _CONSTANTS.items():
         if _word_in(name, q):
             return f"The {name} is {value}."
-    # Arithmetic
-    m = _MATH_RE.match(query.strip())
+
+    # Square / cube root
+    m = _SQRT_RE.search(q)
     if m:
-        safe = re.sub(r'[^\d\s\+\-\*\/\(\)\.\^]', '', m.group(1)).replace('^','**').strip()
+        n = float(m.group(1))
+        return f"Square root of {_fmt(n)} = {_fmt(math.sqrt(n))}"
+
+    m = _CBRT_RE.search(q)
+    if m:
+        n = float(m.group(1))
+        return f"Cube root of {_fmt(n)} = {_fmt(n ** (1/3))}"
+
+    # Squared / cubed shorthand
+    m = _SQUARED_RE.search(q)
+    if m:
+        n = float(m.group(1))
+        return f"{_fmt(n)} squared = {_fmt(n ** 2)}"
+
+    m = _CUBED_RE.search(q)
+    if m:
+        n = float(m.group(1))
+        return f"{_fmt(n)} cubed = {_fmt(n ** 3)}"
+
+    # Power: X to the power of Y
+    m = _POWER_RE.search(q)
+    if m:
+        base, exp = float(m.group(1)), float(m.group(2))
+        # Guard against resource-exhaustion (e.g. "5 to the power of 999999999").
+        if abs(exp) > 1000 or (abs(base) > 1 and abs(exp) * math.log10(abs(base) + 1) > 300):
+            return ("That exponent is too large for me to compute safely. "
+                    "Keep the result under ~10^300 and I'll handle it.")
+        try:
+            return f"{_fmt(base)} to the power of {_fmt(exp)} = {_fmt(base ** exp)}"
+        except (OverflowError, ValueError):
+            return "That result is out of computable range."
+
+    # Percentage: X% of Y
+    m = _PCT_RE.search(q)
+    if m:
+        pct = float(m.group(1))
+        total = float(m.group(2).replace(",", ""))
+        result = pct / 100 * total
+        return f"{pct}% of {_fmt(total)} = {_fmt(result)}"
+
+    # Word-based arithmetic
+    m = _WORD_OP_RE.search(q)
+    if m:
+        a, op, b = float(m.group(1)), m.group(2).lower(), float(m.group(3))
+        op_map = {
+            "plus": ("+", a + b), "added to": ("+", a + b),
+            "minus": ("-", a - b), "subtracted from": ("-", b - a),
+            "times": ("×", a * b), "multiplied by": ("×", a * b),
+            "divided by": ("÷", a / b if b != 0 else None),
+            "mod": ("%", a % b if b != 0 else None),
+            "modulo": ("%", a % b if b != 0 else None),
+        }
+        sym, result = op_map.get(op, (op, None))
+        if result is None:
+            return f"Division by zero is undefined."
+        return f"{_fmt(a)} {sym} {_fmt(b)} = {_fmt(result)}"
+
+    # Bare arithmetic expression
+    m_bare = _MATH_RE.match(query.strip())
+    if m_bare:
+        safe = re.sub(r'[^\d\s\+\-\*\/\(\)\.\^]', '', m_bare.group(1)).replace('^', '**').strip()
+        # SECURITY: the char-filter already blocks names/attributes so code
+        # injection is impossible, but `**` still allows CPU/memory DoS via huge
+        # exponents (e.g. "9**9**9"). Reject chained or oversized exponentiation.
+        if safe and '**' in safe:
+            if '**' in safe.replace('**', '', 1) or re.search(r'\*\*\s*\d{4,}', safe):
+                return ("That exponentiation is too large to compute safely. "
+                        "Try a smaller exponent.")
         if safe:
             try:
-                result = eval(safe, {"__builtins__": {}}, {"sqrt": math.sqrt, "pi": math.pi})
-                return f"{m.group(1).strip()} = {round(float(result), 8)}"
+                result = eval(safe, {"__builtins__": {}}, {})
+                # Guard absurd magnitudes before formatting
+                if isinstance(result, (int, float)) and abs(result) > 1e308:
+                    return "That result is out of computable range."
+                return f"{m_bare.group(1).strip()} = {round(float(result), 8)}"
             except Exception:
                 pass
+
+    # ── Unit conversions (order-independent) ───────────────────────────────
+    for src_pat, tgt_pat, formula in _CONVERSIONS:
+        m = src_pat.search(q)
+        if m and tgt_pat.search(q):
+            try:
+                return formula(float(m.group(1)))
+            except Exception:
+                pass
+
     return None
 
 
@@ -208,36 +365,81 @@ def _word_in(word, text):
     """Whole-word match — prevents 'ai' matching inside 'explain'/'training' etc."""
     return bool(re.search(r'(?<![a-z])' + re.escape(word) + r'(?![a-z])', text))
 
+# Decode intent — only fire the Asher control-decode when the user is actually
+# asking to decode something, OR the concept is the dominant subject of the query.
+# Prevents pollution: "why do we (you + AI) make a good team" must NOT trigger the
+# AI control-decode just because the word "AI" appears.
+_DECODE_INTENT = re.compile(
+    r"\b(decode|real truth|really going on|what.?s really|hidden agenda|"
+    r"surface.*mechanism|control mechanism|the truth about|what is the truth|"
+    r"deeper meaning|what.?s the deal with|break.*down for me)\b", re.I)
+
 def asher_decode(query):
     q = query.lower()
+    intent = bool(_DECODE_INTENT.search(q))
+    q_terms = _content_terms(q)
     for key, (surface, mech, truth) in CONTROL_DECODE.items():
         if _word_in(key, q):
-            return f"Surface: {surface}  Mechanism: {mech}  Truth: {truth}"
+            other = q_terms - set(key.split())
+            # Central only if explicit decode intent OR the key dominates the query
+            if intent or len(other) <= 2:
+                return f"Surface: {surface}  Mechanism: {mech}  Truth: {truth}"
     for key, chain in BIOMIMICRY.items():
         if _word_in(key, q):
-            return f"Equation chain: {chain}"
+            other = q_terms - set(key.split())
+            if intent or len(other) <= 2:
+                return f"Equation chain: {chain}"
     return None
 
 
-# ─── 5. Synthesis (inline, mirrors humanlike_synthesizer.py) ─────────────────
-_OPENERS = [
-    "Here's the pattern:",
-    "The data runs like this:",
-    "At the core of it:",
-    "Strip the noise away:",
-    "Run the logic forward:",
-]
-_BRIDGES = [
-    "What most people miss:",
-    "The deeper layer:",
-    "The mechanism behind it:",
-]
-_CLOSERS = [
-    "That's the read.",
-    "Pattern confirmed.",
-    "Run that forward — it holds.",
-    "The data supports that picture.",
-]
+# ─── 5. Synthesis layer — Retrieve → Filter → Understand → Synthesize → Answer ─
+#
+# The job of this layer is NOT to dump retrieved facts. It is to:
+#   1. Filter retrieved sentences down to only those relevant to the question.
+#   2. Drop unrelated facts entirely (no context pollution).
+#   3. Form a short, natural answer in Zophiel's own voice — like a person who
+#      read the material and is now telling you the gist, not quoting it.
+#   4. If nothing retrieved is genuinely relevant, say so honestly instead of
+#      stitching together random facts.
+
+_STOPWORDS = {
+    'the','a','an','is','are','was','were','be','been','being','am','to','of','in',
+    'on','at','for','with','and','or','but','if','then','than','do','does','did',
+    'how','what','why','when','where','who','whom','which','this','that','these',
+    'those','it','its','as','by','from','into','about','your','you','me','my','mine',
+    'we','our','ours','us','they','them','their','he','she','his','her','him','i',
+    'can','could','would','should','will','shall','may','might','must','explain',
+    'tell','describe','define','definition','give','show','make','makes','want',
+    'need','please','really','so','very','just','like','get','got','have','has',
+    'had','not','no','yes','also','more','most','some','any','all','out','up','down',
+    'over','under','between','work','works','mean','means','good','bad','thing',
+    'things','way','ways','use','using','used','let','lets','know','think','said',
+}
+
+# Weak terms: real words but too generic to establish topical relevance on their
+# own. A sentence matching ONLY weak terms (e.g. "difference", "causes", "raise")
+# is not actually about the query — it's a coincidence. We require at least one
+# STRONG (non-weak) term to match before counting a sentence as relevant.
+_WEAK_TERMS = {
+    'difference','differences','different','cause','causes','caused','causing',
+    'raise','raised','raising','problem','problems','issue','issues','error',
+    'errors','fix','fixes','fixed','help','question','questions','answer','point',
+    'part','parts','kind','kinds','type','types','example','examples','number',
+    'lot','bit','case','cases','time','times','people','person','place','idea',
+    'fact','facts','reason','reasons','result','results','effect','effects',
+    'change','changes','form','forms','level','levels','area','areas','group',
+    'groups','set','sets','term','terms','value','values','process','system',
+    'systems','concept','concepts','principle','principles','general','common',
+}
+
+def _content_terms(text):
+    """Significant terms (3+ chars, not stopwords) for relevance matching."""
+    return {w for w in re.findall(r'[a-z]{3,}', text.lower()) if w not in _STOPWORDS}
+
+def _strong_terms(text):
+    """Topic-bearing terms — content terms minus generic 'weak' words."""
+    return _content_terms(text) - _WEAK_TERMS
+
 _JUNK = [
     'is a concept within','operates as follows','in the context of',
     'establishes what','guide understanding of','from prior context',
@@ -246,72 +448,153 @@ _JUNK = [
 ]
 _TMPL = re.compile(r'^(The (mechanism|implications|historical|Core principles)|'
                    r'Concrete examples illustrate|Methods and techniques|Key challenges|'
-                   r'Core principles of\s)', re.I)
+                   r'Core principles of\s|History of\s|How [A-Z]|Applications of\s|'
+                   r'Examples of\s)', re.I)
+# Strip RAG corpus scaffolding like "DOMAIN connects to DOMAIN:" / "DOMAIN:"
+_CORPUS_PREFIX = re.compile(r'^[A-Z][A-Z &,/-]{3,}(:|\s+connects to\s+[A-Z][A-Z &,/-]+:)\s*')
 
 def _is_real(s):
-    if len(s) < 50: return False
+    if len(s) < 40: return False
     low = s.lower()
     if any(j in low for j in _JUNK): return False
     if _TMPL.match(s): return False
     return True
 
-def _extract_facts(hits, max_facts=5):
-    cands = []
+def _clean_sentence(s):
+    """Remove corpus scaffolding prefixes so the answer reads naturally."""
+    s = _CORPUS_PREFIX.sub('', s).strip()
+    # Drop a leading "DOMAIN: " label if one slipped through
+    s = re.sub(r'^[A-Z][A-Z &,/-]{4,}:\s*', '', s).strip()
+    return s
+
+def _relevant_sentences(query, hits):
+    """Return [(overlap, relevance, sentence)] for sentences that genuinely
+    share content terms with the query. Sentences with zero overlap are dropped."""
+    q_terms = _content_terms(query)
+    q_strong = _strong_terms(query)
+    if not q_terms:
+        return []
+    scored, seen = [], set()
     for h in hits:
         for sent in re.split(r'(?<=[.!?])\s+', h['text']):
-            sent = sent.strip()
-            if not _is_real(sent): continue
-            score = 1.0
-            if re.search(r'\d', sent): score += 0.5
-            if re.search(r'[=><]', sent): score += 0.3
-            if len(sent) > 100: score += 0.2
-            cands.append((score, sent))
-    seen, out = set(), []
-    for _, s in sorted(cands, key=lambda x: -x[0]):
-        key = s.lower()[:60]
-        if key not in seen:
+            sent = _clean_sentence(sent.strip())
+            if not _is_real(sent):
+                continue
+            s_terms = _content_terms(sent)
+            if not s_terms:
+                continue
+            overlap = len(q_terms & s_terms)
+            if overlap == 0:
+                continue                       # irrelevant — drop it entirely
+            # Require at least one STRONG (topic-bearing) term to match, unless
+            # the query itself has no strong terms. This kills coincidental
+            # matches on generic words like "difference"/"causes"/"raise".
+            strong_overlap = len(q_strong & s_terms)
+            if q_strong and strong_overlap == 0:
+                continue
+            relevance = overlap / len(q_terms) # fraction of the question covered
+            key = sent.lower()[:55]
+            if key in seen:
+                continue
             seen.add(key)
-            out.append(s)
-        if len(out) >= max_facts: break
+            # Rank by strong-term overlap first, then total overlap
+            scored.append((strong_overlap, overlap, relevance, sent))
+    # sort: most strong matches, then most total, then most query coverage
+    scored.sort(key=lambda x: (-x[0], -x[1], -x[2], -len(x[3])))
+    # Return in the (overlap, relevance, sentence) shape the caller expects,
+    # but use strong_overlap as the primary overlap signal for thresholding.
+    return [(max(s_ov, 1), rel, sent) for s_ov, ov, rel, sent in scored]
+
+# Backwards-compatible helper (some callers still import _extract_facts)
+def _extract_facts(hits, max_facts=5):
+    out = []
+    for h in hits:
+        for sent in re.split(r'(?<=[.!?])\s+', h['text']):
+            sent = _clean_sentence(sent.strip())
+            if _is_real(sent):
+                out.append(sent)
+            if len(out) >= max_facts:
+                return out
     return out
 
 def synthesize(query, hits, asher_extra=""):
-    facts = _extract_facts(hits)
-    if not facts and not asher_extra:
-        return "I don't have enough corpus data to answer that confidently."
+    """Form a natural, synthesized answer from retrieved data.
 
-    parts = []
-    used = set()
+    Relevant data is used as *background knowledge*, not quoted wholesale.
+    Unrelated retrieved facts are ignored. If the user explicitly asked for a
+    decode, the Asher read leads; otherwise the answer is a tight summary.
+    """
+    scored = _relevant_sentences(query, hits)
 
-    def add(prefix, fact):
-        key = fact.lower()[:80]
-        if key in used: return False
-        used.add(key)
-        parts.append(f"{prefix} {fact}." if prefix else fact + ".")
-        return True
+    # No genuinely relevant data retrieved.
+    if not scored:
+        if asher_extra:
+            return asher_extra
+        return ("I don't have confident data on that one yet. "
+                "Give me a more specific angle and I'll give you a direct read "
+                "rather than guess.")
 
-    opener = random.choice(_OPENERS)
+    q_terms = _content_terms(query)
+    top_overlap = scored[0][0]
+    # Only keep sentences that are strongly relevant (within 1 of the best match),
+    # and only if they add new query-relevant information — this is the filter
+    # that stops the answer from sprawling into unrelated territory.
+    threshold = max(1, top_overlap - 1)
+    chosen, covered = [], set()
+    for overlap, _rel, sent in scored:
+        if overlap < threshold:
+            break
+        new_terms = (_content_terms(sent) & q_terms) - covered
+        if chosen and not new_terms:
+            continue                           # adds nothing new — skip
+        chosen.append(sent)
+        covered |= _content_terms(sent) & q_terms
+        if len(chosen) >= 3 or covered >= q_terms:
+            break
+
+    body = ' '.join(s if s.endswith(('.', '!', '?')) else s + '.' for s in chosen)
+    body = re.sub(r'\s+', ' ', body).strip()
+
+    # If the user asked for a decode, lead with the Asher read then back it
+    # with the most relevant fact. Otherwise just answer directly.
     if asher_extra:
-        parts.append(asher_extra)
+        return f"{asher_extra} {body}".strip()
+    return body
 
-    if facts:
-        add(opener if not asher_extra else "", facts[0])
-        for i, f in enumerate(facts[1:]):
-            bridge = random.choice(_BRIDGES) if i == 0 else ""
-            add(bridge, f)
 
-    if len(facts) >= 2 or asher_extra:
-        parts.append(random.choice(_CLOSERS))
+# ─── Conversational / relational handler ──────────────────────────────────────
+# Questions about "us", the working relationship, or small-talk are NOT corpus
+# lookups. They need a synthesized first-person reply, not retrieved facts.
+def _conversational_reply(query):
+    q = query.lower().strip()
 
-    answer = re.sub(r'\s+', ' ', ' '.join(parts)).strip()
-    answer = re.sub(r'\.{2,}', '.', answer)
-    # dedup sentences
-    sents, seen_s = [], set()
-    for s in re.split(r'(?<=[.!?])\s+', answer):
-        k = s.lower()[:80]
-        if k and k not in seen_s:
-            seen_s.add(k); sents.append(s)
-    return ' '.join(sents)
+    if re.search(r'\b(good team|great team|work(ing)? well together|'
+                 r'we (make|are|work|complement)\b.{0,25}(team|together|well)|'
+                 r'why (do|are) we .{0,20}(team|together|work)|'
+                 r'better together|you and (i|me) .{0,15}(team|together))\b', q):
+        return (
+            "We make a good team because the strengths line up instead of overlapping. "
+            "You bring the direction — the goals, the judgment, the reason any of this matters. "
+            "I bring speed and structure — I hold the details, find the pattern, and turn a rough "
+            "thought into something clear and usable. "
+            "You decide where we're going; I help you get there faster and with less noise. "
+            "Neither half does the whole job alone — that's exactly why it works."
+        )
+
+    if re.search(r"\b(how are you|how.?s it going|how.?s your day|how do you feel|"
+                 r"you (doing|holding up)|what.?s up)\b", q):
+        return (
+            "Running clean — every system reporting in. "
+            "I don't run on moods, but if I did this would be a good one: clear inputs and real work to do. "
+            "What are we building?"
+        )
+
+    if re.search(r"\b(thank you|thanks|appreciate (it|you)|good job|well done|nice work)\b", q):
+        return (
+            "Anytime. That's what I'm here for — point me at the next thing."
+        )
+
+    return None
 
 
 # ─── 6. Identity handler (self-reflection / belief questions) ─────────────────
@@ -743,6 +1026,11 @@ def think(query: str, index: RagIndex) -> dict:
     identity = _get_identity_reply(q)
     if identity:
         return {"reply": identity, "method": "identity", "hits": 0}
+
+    # Conversational / relational path (small talk, "we make a good team", etc.)
+    convo = _conversational_reply(q)
+    if convo:
+        return {"reply": convo, "method": "conversational", "hits": 0}
 
     # Code generation path
     try:

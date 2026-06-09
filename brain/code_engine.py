@@ -17,7 +17,19 @@ import re
 _CODE_TRIGGERS = re.compile(
     r"\b(write|create|build|implement|code|generate|make|show me|give me)\b.{0,40}"
     r"\b(function|class|algorithm|program|script|method|decorator|query|sql|snippet)\b"
-    r"|\b(how (do|to|would) (i|you|we) (implement|write|code|build))\b"
+    r"|\b(how (do|to|would|can) (i|you|we) (implement|write|code|build|set up|setup|use|"
+    r"make|create|parse|read|configure|connect|handle|validate|test))\b"
+    # Everyday Python "how do I" / library topics
+    r"|\b(logging|logger|argparse|command.line argument|cli argument|"
+    r"requests library|http request|api request|pytest|unit test|test fixture|"
+    r"custom exception|exception class|retry decorator|exponential backoff|"
+    r"environment variable|env var|dotenv|sqlite|database wrapper|"
+    r"dataclass|pandas|dataframe|subprocess|pathlib|context manager|"
+    r"regular expression|regex|enum class|threading lock|read.*file|write.*file|"
+    # Common Python error / debugging questions
+    r"keyerror|indexerror|recursionerror|typeerror|valueerror|attributeerror|"
+    r"importerror|modulenotfound|indentationerror|segmentation fault|segfault|"
+    r"name.?error|unboundlocal|stack overflow|maximum recursion)\b"
     r"|\b(fibonacci|quicksort|mergesort|binary search|linked list|stack|queue|"
     r"palindrome|factorial|flatten|decorator|traverse|traversal|recursion|sorting|hashing|"
     r"tree|lru cache|two sum|singleton|merge sort|context manager|generator|prime number|"
@@ -2497,9 +2509,17 @@ def lcs_string(s1: str, s2: str) -> str:
 
 # --- Test ---
 assert lcs_length("ABCBDAB", "BDCAB") == 4
-assert lcs_string("ABCBDAB", "BDCAB") == "BCAB"
+# Multiple valid LCSs of length 4 exist ("BCAB", "BDAB") — verify it is a
+# genuine common subsequence of the right length, not one specific string.
+def _is_subseq(sub, s):
+    it = iter(s)
+    return all(c in it for c in sub)
+_result = lcs_string("ABCBDAB", "BDCAB")
+assert len(_result) == 4
+assert _is_subseq(_result, "ABCBDAB") and _is_subseq(_result, "BDCAB")
 assert lcs_length("", "ABC") == 0
 assert lcs_length("ABC", "ABC") == 3
+assert lcs_string("ABC", "ABC") == "ABC"
 print("All tests passed.")
 ''',
     },
@@ -4754,6 +4774,903 @@ assert "cache-03" not in dist2
 
 # A specific key always maps to the same node (deterministic)
 assert ring.get_node("user:42") == ring.get_node("user:42")
+print("All tests passed.")
+''',
+    },
+
+    # ── Everyday Python: Logging Setup ────────────────────────────────────────
+
+    {
+        "keys": ["logging", "set up logging", "python logging", "configure logging",
+                 "logger setup"],
+        "lang": "python",
+        "title": "Python Logging Setup",
+        "complexity": "O(1) per log call",
+        "code": '''\
+import logging
+import sys
+from logging.handlers import RotatingFileHandler
+
+def setup_logging(name: str = "app", level: int = logging.INFO,
+                  log_file: str | None = None) -> logging.Logger:
+    """Configure a logger with console output and optional rotating file output.
+
+    Best practice: configure once at startup, then use logging.getLogger(name)
+    throughout the codebase.
+    """
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    logger.handlers.clear()   # avoid duplicate handlers on re-init
+
+    fmt = logging.Formatter(
+        "%(asctime)s | %(name)s | %(levelname)-8s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # Console handler
+    console = logging.StreamHandler(sys.stdout)
+    console.setFormatter(fmt)
+    logger.addHandler(console)
+
+    # Rotating file handler (5 MB per file, keep 3 backups)
+    if log_file:
+        fh = RotatingFileHandler(log_file, maxBytes=5_000_000, backupCount=3)
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+
+    return logger
+
+# --- Test ---
+log = setup_logging("demo", level=logging.DEBUG)
+log.debug("Debug detail")
+log.info("Service started")
+log.warning("Disk at 80%")
+log.error("Connection failed")
+assert log.level == logging.DEBUG
+assert len(log.handlers) == 1   # console only (no file)
+print("All tests passed.")
+''',
+    },
+
+    # ── Everyday Python: argparse CLI ─────────────────────────────────────────
+
+    {
+        "keys": ["argparse", "command line argument", "cli argument", "argument parser",
+                 "command line interface", "parse arguments"],
+        "lang": "python",
+        "title": "Argparse CLI Argument Parser",
+        "complexity": "O(n) in number of arguments",
+        "code": '''\
+import argparse
+
+def build_parser() -> argparse.ArgumentParser:
+    """Define a command-line interface with positional, optional, and flag args."""
+    parser = argparse.ArgumentParser(
+        prog="mytool",
+        description="Process files with configurable options.",
+    )
+    parser.add_argument("input", help="Input file path")                 # positional
+    parser.add_argument("-o", "--output", default="out.txt",
+                        help="Output file (default: out.txt)")           # optional
+    parser.add_argument("-n", "--count", type=int, default=1,
+                        help="Number of iterations")                     # typed
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Enable verbose output")                    # flag
+    parser.add_argument("--mode", choices=["fast", "safe"], default="safe",
+                        help="Processing mode")                          # choices
+    return parser
+
+def main(argv: list[str] | None = None) -> dict:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return vars(args)
+
+# --- Test ---
+result = main(["data.csv", "-o", "result.txt", "-n", "5", "-v", "--mode", "fast"])
+assert result["input"]   == "data.csv"
+assert result["output"]  == "result.txt"
+assert result["count"]   == 5
+assert result["verbose"] is True
+assert result["mode"]    == "fast"
+
+# Defaults
+defaults = main(["data.csv"])
+assert defaults["output"] == "out.txt"
+assert defaults["count"]  == 1
+assert defaults["verbose"] is False
+print("All tests passed.")
+''',
+    },
+
+    # ── Everyday Python: HTTP Requests ────────────────────────────────────────
+
+    {
+        "keys": ["http request", "requests library", "make http request", "api request",
+                 "rest api call", "get post request"],
+        "lang": "python",
+        "title": "HTTP Requests (GET / POST with Error Handling)",
+        "complexity": "Network-bound (I/O)",
+        "code": '''\
+import json
+import urllib.request
+import urllib.parse
+import urllib.error
+from typing import Any
+
+def http_get(url: str, params: dict | None = None,
+             headers: dict | None = None, timeout: float = 10.0) -> dict[str, Any]:
+    """Perform an HTTP GET. Returns {status, body, json}. Uses stdlib only.
+
+    With the popular `requests` library this is simply:
+        r = requests.get(url, params=params, headers=headers, timeout=timeout)
+        return {"status": r.status_code, "json": r.json()}
+    """
+    if params:
+        url = f"{url}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url, headers=headers or {}, method="GET")
+    return _send(req, timeout)
+
+def http_post(url: str, data: dict, headers: dict | None = None,
+              timeout: float = 10.0) -> dict[str, Any]:
+    """Perform an HTTP POST with a JSON body."""
+    body = json.dumps(data).encode("utf-8")
+    hdrs = {"Content-Type": "application/json", **(headers or {})}
+    req = urllib.request.Request(url, data=body, headers=hdrs, method="POST")
+    return _send(req, timeout)
+
+def _send(req: urllib.request.Request, timeout: float) -> dict[str, Any]:
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+            ctype = resp.headers.get("Content-Type", "")
+            return {
+                "status": resp.status,
+                "body":   raw,
+                "json":   json.loads(raw) if "json" in ctype and raw else None,
+            }
+    except urllib.error.HTTPError as e:
+        return {"status": e.code, "body": e.read().decode("utf-8", "replace"), "json": None}
+    except urllib.error.URLError as e:
+        return {"status": 0, "body": str(e.reason), "json": None}
+
+# --- Test (mock-free structural check) ---
+import inspect
+assert "timeout" in inspect.signature(http_get).parameters
+assert "timeout" in inspect.signature(http_post).parameters
+# Live check (uncomment if network available):
+# r = http_get("https://httpbin.org/get", params={"a": "1"})
+# assert r["status"] == 200
+print("Module loaded. http_get / http_post ready.")
+''',
+    },
+
+    # ── Everyday Python: pytest Fixtures ──────────────────────────────────────
+
+    {
+        "keys": ["pytest", "unit test", "test fixture", "pytest fixture", "write a test",
+                 "testing python"],
+        "lang": "python",
+        "title": "Pytest Unit Tests with Fixtures",
+        "complexity": "O(1) per assertion",
+        "code": '''\
+import pytest
+
+# --- Code under test ---
+class BankAccount:
+    def __init__(self, balance: float = 0.0) -> None:
+        self.balance = balance
+    def deposit(self, amount: float) -> None:
+        if amount <= 0:
+            raise ValueError("amount must be positive")
+        self.balance += amount
+    def withdraw(self, amount: float) -> None:
+        if amount > self.balance:
+            raise ValueError("insufficient funds")
+        self.balance -= amount
+
+# --- Fixtures ---
+@pytest.fixture
+def account():
+    """Fresh account with $100 for each test."""
+    return BankAccount(balance=100.0)
+
+@pytest.fixture
+def empty_account():
+    return BankAccount()
+
+# --- Tests ---
+def test_deposit(account):
+    account.deposit(50)
+    assert account.balance == 150.0
+
+def test_withdraw(account):
+    account.withdraw(30)
+    assert account.balance == 70.0
+
+def test_overdraft_raises(account):
+    with pytest.raises(ValueError, match="insufficient funds"):
+        account.withdraw(999)
+
+def test_negative_deposit_raises(empty_account):
+    with pytest.raises(ValueError):
+        empty_account.deposit(-5)
+
+@pytest.mark.parametrize("start,amount,expected", [
+    (100, 25, 125),
+    (0, 10, 10),
+    (50, 50, 100),
+])
+def test_deposit_parametrized(start, amount, expected):
+    acc = BankAccount(start)
+    acc.deposit(amount)
+    assert acc.balance == expected
+
+# --- Run inline (normally: `pytest test_file.py`) ---
+if __name__ == "__main__":
+    acc = BankAccount(100)
+    acc.deposit(50); assert acc.balance == 150
+    acc.withdraw(30); assert acc.balance == 120
+    try:
+        acc.withdraw(9999); assert False
+    except ValueError:
+        pass
+    print("All tests passed.")
+''',
+    },
+
+    # ── Everyday Python: Custom Exception ─────────────────────────────────────
+
+    {
+        "keys": ["custom exception", "exception class", "user defined exception",
+                 "raise custom error", "exception hierarchy"],
+        "lang": "python",
+        "title": "Custom Exception Classes",
+        "complexity": "O(1)",
+        "code": '''\
+class AppError(Exception):
+    """Base exception for the application — catch this to handle all app errors."""
+    def __init__(self, message: str, code: int = 500) -> None:
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+class ValidationError(AppError):
+    """Raised when input validation fails."""
+    def __init__(self, field: str, message: str) -> None:
+        super().__init__(f"Validation failed on {field!r}: {message}", code=400)
+        self.field = field
+
+class NotFoundError(AppError):
+    """Raised when a resource does not exist."""
+    def __init__(self, resource: str, id: str) -> None:
+        super().__init__(f"{resource} {id!r} not found", code=404)
+        self.resource = resource
+        self.id = id
+
+# --- Usage ---
+def get_user(user_id: str) -> dict:
+    if not user_id:
+        raise ValidationError("user_id", "must not be empty")
+    if user_id not in {"1", "2"}:
+        raise NotFoundError("User", user_id)
+    return {"id": user_id, "name": "Alice"}
+
+# --- Test ---
+assert get_user("1")["name"] == "Alice"
+
+try:
+    get_user("")
+    assert False
+except ValidationError as e:
+    assert e.code == 400
+    assert e.field == "user_id"
+
+try:
+    get_user("99")
+    assert False
+except NotFoundError as e:
+    assert e.code == 404
+
+# Base class catches all
+try:
+    get_user("99")
+except AppError as e:        # catches NotFoundError via inheritance
+    assert e.code == 404
+print("All tests passed.")
+''',
+    },
+
+    # ── Everyday Python: Retry Decorator ──────────────────────────────────────
+
+    {
+        "keys": ["retry decorator", "exponential backoff", "retry logic", "retry on failure",
+                 "retry with backoff"],
+        "lang": "python",
+        "title": "Retry Decorator with Exponential Backoff",
+        "complexity": "Worst case: O(max_retries) attempts",
+        "code": '''\
+import time
+import functools
+import random
+from typing import Callable, Any
+
+def retry(max_retries: int = 3, base_delay: float = 0.1,
+          backoff: float = 2.0, jitter: bool = True,
+          exceptions: tuple = (Exception,)) -> Callable:
+    """Retry a function on failure with exponential backoff.
+
+    Delay sequence: base_delay, base_delay*backoff, base_delay*backoff^2, ...
+    Jitter adds randomness to avoid thundering-herd retries.
+    """
+    def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            delay = base_delay
+            last_exc = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    last_exc = e
+                    if attempt == max_retries:
+                        break
+                    sleep = delay * (random.uniform(0.5, 1.5) if jitter else 1.0)
+                    time.sleep(min(sleep, 0.05))   # capped for demo speed
+                    delay *= backoff
+            raise last_exc       # all retries exhausted
+        return wrapper
+    return decorator
+
+# --- Test ---
+attempts = {"count": 0}
+
+@retry(max_retries=4, base_delay=0.01)
+def flaky() -> str:
+    attempts["count"] += 1
+    if attempts["count"] < 3:
+        raise ConnectionError("transient failure")
+    return "success"
+
+assert flaky() == "success"
+assert attempts["count"] == 3       # failed twice, succeeded on third
+
+# Exhausts retries then raises
+always_fails_count = {"n": 0}
+@retry(max_retries=2, base_delay=0.01)
+def always_fails():
+    always_fails_count["n"] += 1
+    raise ValueError("permanent")
+
+try:
+    always_fails()
+    assert False
+except ValueError:
+    assert always_fails_count["n"] == 2
+print("All tests passed.")
+''',
+    },
+
+    # ── Everyday Python: Environment Variables ────────────────────────────────
+
+    {
+        "keys": ["environment variable", "env var", "dotenv", "read environment",
+                 "config from environment", "os environ"],
+        "lang": "python",
+        "title": "Environment Variables & Config Loading",
+        "complexity": "O(1) per lookup",
+        "code": '''\
+import os
+from typing import Any
+
+def get_env(key: str, default: Any = None, required: bool = False,
+            cast: type = str) -> Any:
+    """Read an environment variable with type casting and validation.
+
+    cast=int / float / bool supported. bool reads 'true/1/yes/on' as True.
+    """
+    raw = os.environ.get(key)
+    if raw is None:
+        if required:
+            raise RuntimeError(f"Required environment variable {key!r} is not set")
+        return default
+    if cast is bool:
+        return raw.strip().lower() in {"true", "1", "yes", "on"}
+    try:
+        return cast(raw)
+    except (ValueError, TypeError):
+        raise RuntimeError(f"Env var {key!r}={raw!r} cannot be cast to {cast.__name__}")
+
+def load_dotenv(path: str = ".env") -> dict[str, str]:
+    """Minimal .env parser — loads KEY=VALUE lines into os.environ.
+
+    For production, use the python-dotenv package.
+    """
+    loaded: dict[str, str] = {}
+    if not os.path.exists(path):
+        return loaded
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip().strip("\\"'")
+            os.environ.setdefault(key, value)
+            loaded[key] = value
+    return loaded
+
+# --- Test ---
+os.environ["MY_PORT"]  = "8080"
+os.environ["MY_DEBUG"] = "true"
+assert get_env("MY_PORT", cast=int)  == 8080
+assert get_env("MY_DEBUG", cast=bool) is True
+assert get_env("MISSING", default="fallback") == "fallback"
+
+try:
+    get_env("MISSING_REQUIRED", required=True)
+    assert False
+except RuntimeError:
+    pass
+print("All tests passed.")
+''',
+    },
+
+    # ── Everyday Python: SQLite Wrapper ───────────────────────────────────────
+
+    {
+        "keys": ["sqlite", "sqlite wrapper", "database wrapper", "sqlite3 python",
+                 "sql database python"],
+        "lang": "python",
+        "title": "SQLite Database Wrapper",
+        "complexity": "Depends on query + indexes",
+        "code": '''\
+import sqlite3
+from contextlib import contextmanager
+from typing import Any, Iterator
+
+class Database:
+    """Lightweight SQLite wrapper with context-managed transactions.
+
+    Uses Row factory so results behave like dicts. Parameterised queries
+    everywhere — never string-format SQL (prevents SQL injection).
+    """
+
+    def __init__(self, path: str = ":memory:") -> None:
+        self.conn = sqlite3.connect(path)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA foreign_keys = ON")
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Cursor]:
+        """Auto-commit on success, rollback on exception."""
+        cur = self.conn.cursor()
+        try:
+            yield cur
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
+        return self.conn.execute(sql, params)
+
+    def query(self, sql: str, params: tuple = ()) -> list[dict]:
+        rows = self.conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def query_one(self, sql: str, params: tuple = ()) -> dict | None:
+        row = self.conn.execute(sql, params).fetchone()
+        return dict(row) if row else None
+
+    def close(self) -> None:
+        self.conn.close()
+
+# --- Test ---
+db = Database()   # in-memory
+with db.transaction() as cur:
+    cur.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INT)")
+    cur.execute("INSERT INTO users (name, age) VALUES (?, ?)", ("Alice", 30))
+    cur.execute("INSERT INTO users (name, age) VALUES (?, ?)", ("Bob", 25))
+
+users = db.query("SELECT * FROM users WHERE age > ? ORDER BY age", (20,))
+assert len(users) == 2
+assert users[0]["name"] == "Bob"     # youngest first
+
+one = db.query_one("SELECT * FROM users WHERE name = ?", ("Alice",))
+assert one["age"] == 30
+
+# Rollback on error
+try:
+    with db.transaction() as cur:
+        cur.execute("INSERT INTO users (name, age) VALUES (?, ?)", ("Carol", 40))
+        raise RuntimeError("simulated failure")
+except RuntimeError:
+    pass
+assert db.query_one("SELECT * FROM users WHERE name = ?", ("Carol",)) is None  # rolled back
+db.close()
+print("All tests passed.")
+''',
+    },
+
+    # ── Everyday Python: Dataclass with Validation ────────────────────────────
+
+    {
+        "keys": ["dataclass", "dataclass validation", "data class python",
+                 "dataclass with validation", "validate dataclass"],
+        "lang": "python",
+        "title": "Dataclass with Validation",
+        "complexity": "O(1) per field",
+        "code": '''\
+from dataclasses import dataclass, field
+from typing import Any
+
+@dataclass
+class User:
+    """User record with validation in __post_init__.
+
+    Dataclasses auto-generate __init__, __repr__, __eq__.
+    __post_init__ runs after the generated __init__ for validation.
+    """
+    name: str
+    email: str
+    age: int = 0
+    tags: list[str] = field(default_factory=list)   # mutable default — must use field()
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise ValueError("name must not be empty")
+        if "@" not in self.email:
+            raise ValueError(f"invalid email: {self.email!r}")
+        if not (0 <= self.age <= 150):
+            raise ValueError(f"age out of range: {self.age}")
+
+@dataclass(frozen=True)   # immutable + hashable
+class Point:
+    x: float
+    y: float
+    def distance_to(self, other: "Point") -> float:
+        return ((self.x - other.x) ** 2 + (self.y - other.y) ** 2) ** 0.5
+
+# --- Test ---
+u = User(name="Alice", email="alice@example.com", age=30)
+assert u.name == "Alice"
+assert u.tags == []
+assert u == User(name="Alice", email="alice@example.com", age=30)   # value equality
+
+try:
+    User(name="", email="x@y.com")
+    assert False
+except ValueError:
+    pass
+
+try:
+    User(name="Bob", email="not-an-email")
+    assert False
+except ValueError:
+    pass
+
+# Frozen dataclass is hashable — usable in sets/dict keys
+p1, p2 = Point(0, 0), Point(3, 4)
+assert p1.distance_to(p2) == 5.0
+assert len({p1, p2, Point(0, 0)}) == 2   # p1 == Point(0,0)
+print("All tests passed.")
+''',
+    },
+
+    # ── Everyday Python: Pandas DataFrame Filtering ───────────────────────────
+
+    {
+        "keys": ["pandas", "dataframe", "filter dataframe", "pandas filter",
+                 "pandas dataframe", "data analysis pandas"],
+        "lang": "python",
+        "title": "Pandas DataFrame Filtering & Aggregation",
+        "complexity": "O(n) filter | O(n log n) sort/groupby",
+        "code": '''\
+import pandas as pd
+
+def analyze(df: pd.DataFrame) -> dict:
+    """Common DataFrame operations: filter, sort, group, aggregate."""
+    results = {}
+
+    # Boolean filtering
+    adults = df[df["age"] >= 18]
+    results["adult_count"] = len(adults)
+
+    # Multiple conditions (use & | with parentheses, not and/or)
+    young_high = df[(df["age"] < 30) & (df["salary"] > 50000)]
+    results["young_high_earners"] = young_high["name"].tolist()
+
+    # isin filter
+    eng = df[df["dept"].isin(["Engineering", "Data"])]
+    results["tech_count"] = len(eng)
+
+    # Group + aggregate
+    by_dept = df.groupby("dept")["salary"].agg(["mean", "max", "count"])
+    results["dept_avg_salary"] = by_dept["mean"].round(0).to_dict()
+
+    # Sort and take top N
+    top = df.nlargest(2, "salary")["name"].tolist()
+    results["top_2_earners"] = top
+
+    # New computed column
+    df = df.assign(salary_k=df["salary"] / 1000)
+    results["max_salary_k"] = df["salary_k"].max()
+
+    return results
+
+# --- Test ---
+df = pd.DataFrame({
+    "name":   ["Alice", "Bob", "Carol", "Dave", "Eve"],
+    "age":    [30, 25, 17, 45, 28],
+    "salary": [85000, 55000, 0, 95000, 60000],
+    "dept":   ["Engineering", "Data", "Intern", "Engineering", "Sales"],
+})
+r = analyze(df)
+assert r["adult_count"] == 4
+assert "Eve" in r["young_high_earners"]      # age 28 < 30, salary 60k > 50k
+assert "Bob" in r["young_high_earners"]
+assert r["tech_count"] == 3                   # 2 Engineering + 1 Data
+assert r["top_2_earners"] == ["Dave", "Alice"]
+assert r["max_salary_k"] == 95.0
+print("All tests passed.")
+''',
+    },
+
+    # ── Everyday Python: File & Path Operations ───────────────────────────────
+
+    {
+        "keys": ["pathlib", "file operations", "read write file", "directory walk",
+                 "list files", "path operations"],
+        "lang": "python",
+        "title": "File & Path Operations (pathlib)",
+        "complexity": "O(n) in directory size for walks",
+        "code": '''\
+from pathlib import Path
+import tempfile
+import shutil
+
+def file_operations_demo(base: Path) -> dict:
+    """Common file/directory operations using pathlib (modern, cross-platform)."""
+    results = {}
+
+    # Create nested directories
+    sub = base / "data" / "logs"
+    sub.mkdir(parents=True, exist_ok=True)
+
+    # Write text
+    f1 = base / "data" / "notes.txt"
+    f1.write_text("line 1\\nline 2\\nline 3", encoding="utf-8")
+
+    # Read text
+    results["content"] = f1.read_text(encoding="utf-8")
+    results["line_count"] = len(f1.read_text().splitlines())
+
+    # Write more files
+    (sub / "app.log").write_text("INFO start")
+    (sub / "err.log").write_text("ERROR boom")
+
+    # Glob — find files by pattern (recursive)
+    results["txt_files"] = [p.name for p in base.rglob("*.txt")]
+    results["log_files"] = sorted(p.name for p in base.rglob("*.log"))
+
+    # Path properties
+    results["stem"]   = f1.stem        # "notes"
+    results["suffix"] = f1.suffix      # ".txt"
+    results["exists"] = f1.exists()
+
+    # File size
+    results["size_bytes"] = f1.stat().st_size
+
+    return results
+
+# --- Test ---
+tmp = Path(tempfile.mkdtemp())
+try:
+    r = file_operations_demo(tmp)
+    assert r["line_count"] == 3
+    assert r["txt_files"] == ["notes.txt"]
+    assert r["log_files"] == ["app.log", "err.log"]
+    assert r["stem"] == "notes"
+    assert r["suffix"] == ".txt"
+    assert r["exists"] is True
+    assert r["size_bytes"] > 0
+    print("All tests passed.")
+finally:
+    shutil.rmtree(tmp)
+''',
+    },
+
+    # ── Everyday Python: Subprocess ───────────────────────────────────────────
+
+    {
+        "keys": ["subprocess", "run shell command", "execute command", "run command python",
+                 "call external program"],
+        "lang": "python",
+        "title": "Subprocess — Run External Commands Safely",
+        "complexity": "Depends on the external process",
+        "code": '''\
+import subprocess
+import sys
+
+def run_command(args: list[str], timeout: float = 30.0) -> dict:
+    """Run an external command safely (list form — no shell injection).
+
+    Returns {returncode, stdout, stderr, success}.
+    NEVER use shell=True with untrusted input.
+    """
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,        # don't raise on non-zero exit
+        )
+        return {
+            "returncode": result.returncode,
+            "stdout":     result.stdout.strip(),
+            "stderr":     result.stderr.strip(),
+            "success":    result.returncode == 0,
+        }
+    except subprocess.TimeoutExpired:
+        return {"returncode": -1, "stdout": "", "stderr": "timeout", "success": False}
+    except FileNotFoundError:
+        return {"returncode": -1, "stdout": "", "stderr": "command not found", "success": False}
+
+# --- Test ---
+# Run the current Python interpreter to print a value (portable across OSes)
+r = run_command([sys.executable, "-c", "print(2 + 2)"])
+assert r["success"] is True
+assert r["stdout"] == "4"
+assert r["returncode"] == 0
+
+# Non-zero exit
+r2 = run_command([sys.executable, "-c", "import sys; sys.exit(3)"])
+assert r2["returncode"] == 3
+assert r2["success"] is False
+
+# Missing command
+r3 = run_command(["this_command_does_not_exist_12345"])
+assert r3["success"] is False
+print("All tests passed.")
+''',
+    },
+
+    # ── Everyday Python: Regex Extraction ─────────────────────────────────────
+
+    {
+        "keys": ["regex", "regular expression", "extract with regex", "regex pattern",
+                 "validate email regex", "parse with regex"],
+        "lang": "python",
+        "title": "Regular Expressions — Extract & Validate",
+        "complexity": "O(n) typical, can be O(2^n) with catastrophic backtracking",
+        "code": '''\
+import re
+
+# Pre-compile patterns (faster when reused)
+EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}")
+PHONE_RE = re.compile(r"\\(?\\d{3}\\)?[-.\\s]?\\d{3}[-.\\s]?\\d{4}")
+URL_RE   = re.compile(r"https?://[^\\s]+")
+
+def extract_emails(text: str) -> list[str]:
+    return EMAIL_RE.findall(text)
+
+def is_valid_email(email: str) -> bool:
+    return bool(EMAIL_RE.fullmatch(email))
+
+def extract_phones(text: str) -> list[str]:
+    return PHONE_RE.findall(text)
+
+def named_groups(date_str: str) -> dict | None:
+    """Parse a date with named capture groups."""
+    m = re.match(r"(?P<year>\\d{4})-(?P<month>\\d{2})-(?P<day>\\d{2})", date_str)
+    return m.groupdict() if m else None
+
+def redact(text: str) -> str:
+    """Replace emails and phones with [REDACTED]."""
+    text = EMAIL_RE.sub("[EMAIL]", text)
+    text = PHONE_RE.sub("[PHONE]", text)
+    return text
+
+# --- Test ---
+text = "Contact alice@example.com or bob@test.org. Call 555-123-4567."
+assert extract_emails(text) == ["alice@example.com", "bob@test.org"]
+assert is_valid_email("good@email.com") is True
+assert is_valid_email("bad-email") is False
+assert extract_phones(text) == ["555-123-4567"]
+
+parsed = named_groups("2026-06-08")
+assert parsed == {"year": "2026", "month": "06", "day": "08"}
+
+redacted = redact("Email alice@example.com phone 555-123-4567")
+assert "[EMAIL]" in redacted and "[PHONE]" in redacted
+assert "alice@example.com" not in redacted
+print("All tests passed.")
+''',
+    },
+
+    # ── Debugging: Common Python Errors ───────────────────────────────────────
+
+    {
+        "keys": ["keyerror", "key error", "indexerror", "index error", "recursionerror",
+                 "recursion error", "maximum recursion", "typeerror", "type error",
+                 "attributeerror", "attribute error", "valueerror", "nameerror",
+                 "name error", "importerror", "modulenotfound", "segmentation fault",
+                 "segfault", "indentationerror", "unboundlocal", "stack overflow",
+                 "common python error", "debug python"],
+        "lang": "python",
+        "title": "Debugging Common Python Errors — Causes & Fixes",
+        "complexity": "Reference",
+        "code": '''\
+# ─────────────────────────────────────────────────────────────────────────────
+# KeyError — accessing a dict key that does not exist
+# ─────────────────────────────────────────────────────────────────────────────
+d = {"a": 1}
+# d["b"]                      # -> KeyError: \'b\'
+val = d.get("b")              # FIX 1: .get() returns None instead of raising
+val = d.get("b", 0)          # FIX 2: supply a default
+if "b" in d:                  # FIX 3: check membership first
+    val = d["b"]
+from collections import defaultdict
+dd = defaultdict(int)        # FIX 4: defaultdict auto-creates missing keys
+dd["b"] += 1
+assert dd["b"] == 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IndexError — list index out of range
+# ─────────────────────────────────────────────────────────────────────────────
+lst = [1, 2, 3]
+# lst[5]                      # -> IndexError
+val = lst[5] if len(lst) > 5 else None   # FIX: bounds-check first
+assert val is None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RecursionError — maximum recursion depth exceeded
+# Cause: missing/incorrect base case, or genuinely deep recursion.
+# ─────────────────────────────────────────────────────────────────────────────
+def countdown(n):
+    if n <= 0:               # FIX: ensure the base case is actually reachable
+        return "done"
+    return countdown(n - 1)
+assert countdown(100) == "done"
+# For deep but valid recursion, convert to iteration or raise the limit:
+# import sys; sys.setrecursionlimit(10000)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TypeError — operation on incompatible types
+# ─────────────────────────────────────────────────────────────────────────────
+# "age: " + 30               # -> TypeError: can only concatenate str
+msg = "age: " + str(30)      # FIX: convert explicitly
+assert msg == "age: 30"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AttributeError — object has no such attribute (often None where you expected
+# an object). Cause: a function returned None, or a typo in the attribute name.
+# ─────────────────────────────────────────────────────────────────────────────
+obj = None
+result = obj.upper() if obj is not None else ""   # FIX: guard against None
+assert result == ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ValueError — right type, wrong value (e.g. int("abc"))
+# ─────────────────────────────────────────────────────────────────────────────
+def safe_int(s, default=0):
+    try:
+        return int(s)        # FIX: wrap risky parsing in try/except
+    except (ValueError, TypeError):
+        return default
+assert safe_int("42") == 42
+assert safe_int("abc") == 0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NameError / ModuleNotFoundError — name/module not defined or not installed
+#   NameError:           you used a variable before assigning it (or a typo).
+#   ModuleNotFoundError: run `pip install <package>` and check the import name.
+#
+# "Segmentation fault" in pure Python is rare — it usually comes from a C
+# extension (numpy, ctypes) or infinite C-level recursion. Isolate the offending
+# library call and check you are passing the data types/shapes it expects.
+# ─────────────────────────────────────────────────────────────────────────────
 print("All tests passed.")
 ''',
     },
