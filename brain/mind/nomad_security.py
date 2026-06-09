@@ -37,8 +37,12 @@ from .organ_registry import SovereignOrganism, OrganState
 
 # ── Types ─────────────────────────────────────────────────────────────────────
 
-Role = Literal["viewer", "operator", "admin", "sovereign"]
-_ROLE_RANK: dict[str, int] = {"viewer": 1, "operator": 2, "admin": 3, "sovereign": 4}
+Role = Literal["guest", "viewer", "operator", "admin", "sovereign"]
+# "guest" is the least-privileged role: exactly the public, read-only/query
+# surface and nothing more. Anonymous callers (open mode) get this — never
+# operator — so an unauthenticated client can ask questions but cannot create
+# jobs, read the audit log, or touch admin/key endpoints.
+_ROLE_RANK: dict[str, int] = {"guest": 1, "viewer": 2, "operator": 3, "admin": 4, "sovereign": 5}
 
 AuditEventType = Literal[
     "job_started","job_completed","job_failed","api_request","api_denied",
@@ -87,23 +91,42 @@ class AuditLog:
 
     @staticmethod
     def _resolve_persistent_key(log_path: Path, chain_key_hex: str | None) -> bytes:
-        # Explicit key always wins and is written so future loads stay consistent.
+        # PREFERRED: supply the chain key out-of-band via ZOPHIEL_CHAIN_KEY (a
+        # secret manager / env var). It is NEVER written to disk, so an attacker
+        # who can write the log directory cannot read the key and forge the chain.
+        # This is the real fix for "the key sits in plaintext next to the log".
+        env_key = chain_key_hex or os.environ.get("ZOPHIEL_CHAIN_KEY")
+        if env_key:
+            try:
+                return bytes.fromhex(env_key.strip())
+            except ValueError:
+                pass  # malformed env key — fall through to file/generate
+
         key_file = log_path / "chain.key"
-        if chain_key_hex:
-            key = bytes.fromhex(chain_key_hex)
-            key_file.write_text(chain_key_hex, encoding="utf-8")
-            return key
         if key_file.exists():
             try:
                 return bytes.fromhex(key_file.read_text(encoding="utf-8").strip())
             except Exception:
                 pass  # corrupt key file — regenerate below
+
+        # FALLBACK (dev/standalone only): generate and persist beside the log.
+        # This is tamper-evident only against an attacker who cannot read the key
+        # file — strictly weaker than an out-of-band key. Create it 0o600 from the
+        # start (open with restrictive mode) rather than chmod-after, and record
+        # a warning so the weaker posture is visible, not silent.
         key = secrets.token_bytes(32)
-        key_file.write_text(key.hex(), encoding="utf-8")
         try:
-            os.chmod(key_file, 0o600)  # restrict to owner where supported
+            fd = os.open(str(key_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(key.hex())
+            try:
+                os.chmod(key_file, 0o600)
+            except OSError:
+                print("[nomad_security] WARNING: could not restrict chain.key "
+                      "permissions; set ZOPHIEL_CHAIN_KEY out-of-band in production.")
         except OSError:
-            pass
+            # Last resort: best-effort write.
+            key_file.write_text(key.hex(), encoding="utf-8")
         return key
 
     def _sign(self, ev_id, ts, ev_type, prev_id, detail) -> str:
@@ -165,15 +188,18 @@ class AuditLog:
 
 class RbacPolicy:
     _ROUTES: dict[str, Role] = {
-        "GET /health":               "viewer",
-        "GET /organism/vitals":      "viewer",
-        "GET /v1/engines":           "viewer",
+        # Public, read-only / query surface — reachable by anonymous "guest".
+        "GET /health":               "guest",
+        "GET /organism/vitals":      "guest",
+        "GET /v1/engines":           "guest",
+        "POST /v1/lookup":           "guest",
+        "POST /v1/query":            "guest",
+        # Stateful / job-control surface — requires a real operator key.
         "GET /v1/jobs":              "operator",
         "GET /v1/jobs/:id":          "operator",
         "GET /v1/jobs/:id/pages":    "operator",
         "POST /v1/jobs":             "operator",
-        "POST /v1/lookup":           "operator",
-        "POST /v1/query":            "operator",
+        # Privileged surface.
         "GET /v1/audit":             "admin",
         "DELETE /v1/jobs/:id":       "admin",
         "POST /v1/admin/keys":       "sovereign",
@@ -188,15 +214,30 @@ class RbacPolicy:
         return any(_ROLE_RANK.get(r, 0) >= need for r in roles)
 
     def _match_route(self, method: str, path: str) -> Role:
-        key = f"{method.upper()} {path}"
+        m = method.upper()
+        key = f"{m} {path}"
         if key in self._ROUTES:
             return self._ROUTES[key]
+        # Parameterised routes (":id"). Correctness must rest on logic, not dict
+        # insertion order: (1) the HTTP METHOD must match — so a DELETE never
+        # resolves to a GET rule's role; (2) the MOST SPECIFIC (longest) base
+        # wins. Unknown routes fail CLOSED at the highest privilege ("admin"),
+        # so an unrecognised path is never silently world-accessible.
+        best_role: Role | None = None
+        best_len = -1
         for pattern, role in self._ROUTES.items():
-            if ":id" in pattern:
-                base = pattern.split(":id")[0].rstrip("/")
-                if path.startswith(base):
-                    return role
-        return "admin"
+            if ":id" not in pattern:
+                continue
+            try:
+                p_method, p_path = pattern.split(" ", 1)
+            except ValueError:
+                continue
+            if p_method.upper() != m:
+                continue                              # method must match
+            base = p_path.split(":id")[0].rstrip("/")
+            if path.startswith(base) and len(base) > best_len:
+                best_role, best_len = role, len(base)
+        return best_role if best_role is not None else "admin"
 
 
 # ── ApiKeyRegistry ───────────────────────────────────────────────────────────
@@ -287,7 +328,12 @@ class ReplayGuard:
             raise ValueError("Replay detected: duplicate nonce.")
         self._seen[key] = now_ms + self._ttl
         if len(self._seen) > self._max:
-            oldest = next(iter(self._seen))
+            # Evict by actual EXPIRY (smallest stored expiry = closest to stale),
+            # not by dict-insertion order. Insertion order stops tracking expiry
+            # the moment _purge() rebuilds the dict, so the old next(iter(...))
+            # could drop a fresh, legitimate nonce while keeping an older one —
+            # widening the replay window under a unique-nonce flood.
+            oldest = min(self._seen, key=self._seen.__getitem__)
             del self._seen[oldest]
 
     def _purge(self) -> None:
@@ -396,6 +442,16 @@ class VitalGuard:
         self._dev_mode   = dev_mode
         self._pulse      = 1
         self._lockdown_reason: str | None = None
+        # Real organ references, wired after the stack is assembled, so the
+        # vitals panel reports actual liveness instead of painted-green gauges.
+        self._replay_guard: "ReplayGuard | None" = None
+        self._rate_limiter: "RateLimiter | None" = None
+        self._ssrf_guard:   "SSRFGuard | None"   = None
+
+    def register_organs(self, *, replay_guard=None, rate_limiter=None, ssrf_guard=None) -> None:
+        self._replay_guard = replay_guard
+        self._rate_limiter = rate_limiter
+        self._ssrf_guard   = ssrf_guard
 
     def pulse_check(self) -> None:
         self._pulse += 1
@@ -416,6 +472,28 @@ class VitalGuard:
 
     def vitals_report(self) -> dict[str, Any]:
         valid, _ = self._audit.verify_chain()
+
+        # Honest organ states: probe the real component, or report "pending"
+        # (not-yet-wired) rather than a fake "vital". A dashboard must never show
+        # green for a gauge that is connected to nothing.
+        def _ssrf_state() -> OrganState:
+            return "vital" if self._ssrf_guard is not None else "pending"
+
+        def _replay_state() -> OrganState:
+            rg = self._replay_guard
+            if rg is None:
+                return "pending"
+            # Saturated nonce table means legitimate nonces are being evicted —
+            # the replay window is degraded; flag it instead of hiding it.
+            return "critical" if len(rg._seen) >= rg._max else "vital"
+
+        def _rate_state() -> OrganState:
+            rl = self._rate_limiter
+            if rl is None:
+                return "pending"
+            recent = [t for t in rl._timestamps if t >= time.time() - 60]
+            return "critical" if len(recent) >= rl._max_rpm else "vital"
+
         return {
             "vital": self.is_vital(),
             "pulse_generation": self._pulse,
@@ -425,9 +503,9 @@ class VitalGuard:
             "organs": [
                 {"id": "audit_immune",  "name": "Audit Immune System", "state": "vital" if valid else "critical"},
                 {"id": "gateway_skin",  "name": "Gateway Skin",        "state": "vital" if self.is_vital() else "critical"},
-                {"id": "ssrf_lungs",    "name": "SSRF Lungs",          "state": "vital"},
-                {"id": "replay_shield", "name": "Replay Shield",       "state": "vital"},
-                {"id": "rate_membrane", "name": "Rate Membrane",       "state": "vital"},
+                {"id": "ssrf_lungs",    "name": "SSRF Lungs",          "state": _ssrf_state()},
+                {"id": "replay_shield", "name": "Replay Shield",       "state": _replay_state()},
+                {"id": "rate_membrane", "name": "Rate Membrane",       "state": _rate_state()},
             ],
         }
 
@@ -471,7 +549,7 @@ def build_security_stack(
     api_key_entries: list[str] | None = None,
     require_auth: bool = False,
     client_allowlist: list[str] | None = None,
-    dev_mode: bool = True,
+    dev_mode: bool = False,   # fail closed: lockdown doctrine ON unless dev opts out
     chain_key_hex: str | None = None,
     max_connections: int = 50,
     max_rpm: int = 120,
@@ -493,8 +571,10 @@ def build_security_stack(
         probes={
             "audit_immune": _audit_probe,
             "antibody_memory": lambda: ("vital", f"{threat_memory.stats()['quarantined']} quarantined"),
+            # Fever is real: the organ reports critical once inflammation crosses
+            # the fever threshold, instead of always painting itself healthy.
             "inflammation": lambda: (
-                ("vital" if inflammation.level() == 0 else "vital"),
+                ("vital" if inflammation.level() < 1.0 else "critical"),
                 f"level {inflammation.level():.2f}"),
         },
         dev_mode=dev_mode,
@@ -532,6 +612,12 @@ def build_security_stack(
         inflammation  = inflammation,
         organism      = organism,
         memory_path   = memory_path,
+    )
+    # Wire the real organ references so the vitals panel reports true liveness.
+    vital.register_organs(
+        replay_guard=stack.replay_guard,
+        rate_limiter=stack.rate_limiter,
+        ssrf_guard=stack.ssrf_guard,
     )
     audit.record("job_started", detail="NOMAD security stack initialised")
     return stack
@@ -588,7 +674,11 @@ def validate_request(stack: NomadSecurityStack, method: str, path: str,
             stack.rate_limiter.release()
             return _reject("invalid_token", "api_denied", detail="invalid_token")
     else:
-        principal = {"subject": "anonymous", "roles": ["operator"]}
+        # Open mode (no auth required): anonymous callers get the LEAST-privileged
+        # "guest" role — enough to use the public query surface, never operator.
+        # This closes the "two guards each assume the other locked up" gap: the
+        # front door being open no longer silently grants operator rights.
+        principal = {"subject": "anonymous", "roles": ["guest"]}
 
     # RBAC
     if not stack.rbac.authorize(principal, method, path):
@@ -608,14 +698,48 @@ def validate_request(stack: NomadSecurityStack, method: str, path: str,
 
 # ── Singleton stack ───────────────────────────────────────────────────────────
 _AUDIT_DIR = os.environ.get("ZOPHIEL_AUDIT_DIR")
-_DEV_MODE  = os.environ.get("ZOPHIEL_DEV_MODE", "true").lower() in ("true","1","yes")
+
+def _detect_dev_mode() -> bool:
+    """Fail CLOSED. Dev mode (which disables the lockdown doctrine) is only ever
+    on when explicitly requested AND no production signal is present.
+
+    Previously this defaulted to "true", shipping the audit-chain verification and
+    lockdown doctrine switched OFF out of the box — the headline feature was inert
+    unless an operator remembered to set ZOPHIEL_DEV_MODE=false. The default is now
+    secure: production unless you opt into dev, and never dev when a deployment
+    environment is detected.
+    """
+    explicit = os.environ.get("ZOPHIEL_DEV_MODE")
+    # Any of these signals a real deployment — force production regardless of flag.
+    prod_signals = any(os.environ.get(k) for k in (
+        "ZOPHIEL_API_KEY", "RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID",
+        "KUBERNETES_SERVICE_HOST", "DYNO", "FLY_APP_NAME", "RENDER",
+        "ZOPHIEL_PRODUCTION", "PORT",
+    ))
+    if prod_signals:
+        return False
+    if explicit is None:
+        return False  # secure default: no flag, no signal -> production
+    return explicit.lower() in ("true", "1", "yes")
+
+_DEV_MODE = _detect_dev_mode()
+
+# When a key is configured OR we are clearly in production, authentication is
+# required. Open mode is now an explicit dev-only posture, not the silent default.
+_REQUIRE_AUTH = bool(os.environ.get("ZOPHIEL_API_KEY")) or not _DEV_MODE
+_API_KEY_ENTRIES = [e.strip() for e in os.environ.get("ZOPHIEL_API_KEYS", "").split(",") if e.strip()]
 
 _stack: NomadSecurityStack | None = None
 
 def get_stack() -> NomadSecurityStack:
     global _stack
     if _stack is None:
-        _stack = build_security_stack(log_dir=_AUDIT_DIR, dev_mode=_DEV_MODE)
+        _stack = build_security_stack(
+            log_dir=_AUDIT_DIR,
+            dev_mode=_DEV_MODE,
+            require_auth=_REQUIRE_AUTH,
+            api_key_entries=_API_KEY_ENTRIES,
+        )
     return _stack
 
 def ssrf_check(url: str) -> tuple[bool, str | None]:

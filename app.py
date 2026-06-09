@@ -356,8 +356,12 @@ def ask():
             _cid = (request.headers.get("x-forwarded-for", "")
                     or request.remote_addr or "anonymous").split(",")[0].strip()
             scan_and_record(_cid, body)
-        except Exception:
-            pass
+        except Exception as _scan_err:
+            # Do NOT silently swallow: a failure here is a blind spot in the
+            # immune memory (injection-shaped input would pass unrecorded). Make
+            # the gap visible so it can be seen and fixed, instead of vanishing.
+            print(f"[zophiel] WARNING: toll-like-receptor scan failed, "
+                  f"injection telemetry not recorded: {_scan_err}")
 
     # If corpus is still loading, go straight to web search
     if not _READY or INDEX is None:
