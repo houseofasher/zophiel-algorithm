@@ -67,6 +67,9 @@ DOMAINS["CHEMISTRY & MATERIALS"] = [
     "Entropy-driven processes like dissolution and mixing increase disorder even when energetically neutral, which is why some endothermic reactions still occur spontaneously.",
     "Spectroscopy identifies substances by how they absorb or emit specific wavelengths; each element has a unique spectral fingerprint.",
     "Stoichiometry uses balanced equations to predict reactant and product quantities, conserving mass and atom count across the reaction.",
+    "Noble gases such as helium, neon, and argon rarely react because their outermost electron shell is completely full (a stable octet), giving them no tendency to gain, lose, or share electrons.",
+    "The octet rule states that atoms are most stable with eight electrons in their valence shell, which drives bonding as atoms gain, lose, or share electrons to reach a full shell.",
+    "Electronegativity is an atom's tendency to attract shared electrons; large differences produce ionic bonds while small differences produce covalent bonds.",
 ]
 
 DOMAINS["BIOLOGY & LIFE SCIENCE"] = [
@@ -85,6 +88,8 @@ DOMAINS["BIOLOGY & LIFE SCIENCE"] = [
     "The nervous system transmits signals as electrochemical action potentials; neurotransmitters carry the signal across synapses between neurons.",
     "CRISPR-Cas9 uses a guide RNA to direct the Cas9 nuclease to a specific DNA sequence, allowing precise cutting and editing of genes.",
     "Proteins fold into specific three-dimensional shapes determined by their amino acid sequence; misfolding causes diseases like Alzheimer's and prion disorders.",
+    "Apoptosis is programmed cell death, an orderly self-destruction that removes damaged, infected, or unneeded cells without inflammation; failure of apoptosis contributes to cancer.",
+    "Cells communicate through signaling molecules like hormones and neurotransmitters that bind receptors and trigger intracellular cascades, coordinating tissue and organ function.",
 ]
 
 DOMAINS["MATHEMATICS & LOGIC"] = [
@@ -115,6 +120,7 @@ DOMAINS["EARTH & SPACE SCIENCE"] = [
     "The Milky Way is a barred spiral galaxy about 100,000 light-years across containing 100-400 billion stars; the Sun orbits its center roughly every 225 million years.",
     "Seasons result from Earth's 23.5-degree axial tilt, not its distance from the Sun, changing the angle and duration of sunlight across the year.",
     "The greenhouse effect warms Earth as gases like CO2, water vapor, and methane absorb and re-emit infrared radiation; without it Earth would average about -18 C.",
+    "Earthquakes are caused by the sudden release of built-up tectonic stress when rock slips along a fault, sending out seismic waves; most occur at the boundaries between moving plates.",
     "A parsec is 3.26 light-years, the distance at which Earth's orbital radius subtends one arcsecond; it is the standard unit for stellar distances.",
     "Tides are caused mainly by the Moon's gravitational pull, producing two high and two low tides daily, with the Sun adding spring and neap variations.",
 ]
@@ -157,6 +163,9 @@ DOMAINS["COMPUTER SCIENCE & ENGINEERING"] = [
     "An operating system manages hardware resources, schedules processes, handles memory with virtual addressing, and provides a file system and system calls.",
     "Compilers translate source code to machine code ahead of time, while interpreters execute it line by line; just-in-time compilers blend both for speed.",
     "The CAP theorem states a distributed system can guarantee at most two of consistency, availability, and partition tolerance simultaneously.",
+    "A deadlock occurs when two or more processes each hold a resource the other needs and wait forever; it requires four conditions (mutual exclusion, hold-and-wait, no preemption, circular wait) and is prevented by breaking any one of them.",
+    "A race condition occurs when the outcome depends on the unpredictable timing of concurrent operations on shared data; locks, mutexes, and atomic operations prevent it.",
+    "A mutex (mutual exclusion lock) lets only one thread access a shared resource at a time, while a semaphore allows a fixed number of concurrent accesses.",
 ]
 
 DOMAINS["ENGINEERING & APPLIED TECH"] = [
@@ -170,6 +179,7 @@ DOMAINS["ENGINEERING & APPLIED TECH"] = [
     "Hydraulic systems transmit force through incompressible fluid; Pascal's principle lets a small force on a small piston lift a large load on a large piston.",
     "A heat pump moves thermal energy against the temperature gradient using a refrigeration cycle, delivering more heat energy than the electrical energy it consumes.",
     "Alternating current is used for power transmission because transformers can efficiently step voltage up for long-distance transmission and down for safe use.",
+    "A transformer changes AC voltage through electromagnetic induction: alternating current in the primary coil induces a changing magnetic field in an iron core, inducing voltage in the secondary coil in proportion to the ratio of turns between the two coils.",
 ]
 
 # ── DOMAIN 04 — PHILOSOPHY ───────────────────────────────────────────────────

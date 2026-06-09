@@ -29,7 +29,10 @@ _CODE_TRIGGERS = re.compile(
     # Common Python error / debugging questions
     r"keyerror|indexerror|recursionerror|typeerror|valueerror|attributeerror|"
     r"importerror|modulenotfound|indentationerror|segmentation fault|segfault|"
-    r"name.?error|unboundlocal|stack overflow|maximum recursion)\b"
+    r"name.?error|unboundlocal|stack overflow|maximum recursion|"
+    # More structures / tasks
+    r"binary search tree|\bbst\b|debounce|throttle function|deduplicate|dedupe|"
+    r"remove duplicates|unique (list|elements|values)|distinct elements)\b"
     r"|\b(fibonacci|quicksort|mergesort|binary search|linked list|stack|queue|"
     r"palindrome|factorial|flatten|decorator|traverse|traversal|recursion|sorting|hashing|"
     r"tree|lru cache|two sum|singleton|merge sort|context manager|generator|prime number|"
@@ -5589,6 +5592,203 @@ print("All tests passed.")
 ''',
     },
 
+    # ── Binary Search Tree ────────────────────────────────────────────────────
+
+    {
+        "keys": ["binary search tree", "bst", "build a binary search tree", "bst class",
+                 "implement a bst", "ordered tree"],
+        "lang": "python",
+        "title": "Binary Search Tree (Insert, Search, Delete, In-order)",
+        "complexity": "Avg O(log n) insert/search/delete | Worst O(n) if unbalanced",
+        "code": '''\
+from __future__ import annotations
+from typing import Optional
+
+class BSTNode:
+    def __init__(self, val: int) -> None:
+        self.val = val
+        self.left: Optional[BSTNode] = None
+        self.right: Optional[BSTNode] = None
+
+class BinarySearchTree:
+    """Binary search tree: left subtree < node < right subtree.
+
+    In-order traversal yields elements in sorted order.
+    """
+
+    def __init__(self) -> None:
+        self.root: Optional[BSTNode] = None
+
+    def insert(self, val: int) -> None:
+        self.root = self._insert(self.root, val)
+
+    def _insert(self, node: Optional[BSTNode], val: int) -> BSTNode:
+        if node is None:
+            return BSTNode(val)
+        if val < node.val:
+            node.left = self._insert(node.left, val)
+        elif val > node.val:
+            node.right = self._insert(node.right, val)
+        return node   # duplicates ignored
+
+    def search(self, val: int) -> bool:
+        node = self.root
+        while node:
+            if val == node.val:
+                return True
+            node = node.left if val < node.val else node.right
+        return False
+
+    def delete(self, val: int) -> None:
+        self.root = self._delete(self.root, val)
+
+    def _delete(self, node: Optional[BSTNode], val: int) -> Optional[BSTNode]:
+        if node is None:
+            return None
+        if val < node.val:
+            node.left = self._delete(node.left, val)
+        elif val > node.val:
+            node.right = self._delete(node.right, val)
+        else:
+            if node.left is None:
+                return node.right
+            if node.right is None:
+                return node.left
+            succ = node.right                      # in-order successor
+            while succ.left:
+                succ = succ.left
+            node.val = succ.val
+            node.right = self._delete(node.right, succ.val)
+        return node
+
+    def in_order(self) -> list[int]:
+        result: list[int] = []
+        def visit(n: Optional[BSTNode]) -> None:
+            if n:
+                visit(n.left); result.append(n.val); visit(n.right)
+        visit(self.root)
+        return result
+
+# --- Test ---
+bst = BinarySearchTree()
+for v in [5, 3, 8, 1, 4, 7, 9, 2]:
+    bst.insert(v)
+assert bst.in_order() == [1, 2, 3, 4, 5, 7, 8, 9]   # sorted
+assert bst.search(7) is True
+assert bst.search(6) is False
+bst.delete(8)                                        # delete node with two children
+assert bst.in_order() == [1, 2, 3, 4, 5, 7, 9]
+bst.delete(1)                                        # delete leaf
+assert bst.search(1) is False
+print("All tests passed.")
+''',
+    },
+
+    # ── Debounce Decorator ────────────────────────────────────────────────────
+
+    {
+        "keys": ["debounce", "debounce decorator", "throttle function", "debounce function"],
+        "lang": "python",
+        "title": "Debounce Decorator",
+        "complexity": "O(1) per call",
+        "code": '''\
+import threading
+import functools
+import time
+from typing import Callable, Any
+
+def debounce(wait: float) -> Callable:
+    """Delay a function call until `wait` seconds have passed without a new call.
+
+    Each new call cancels the pending one and restarts the timer — only the
+    LAST call in a burst actually runs. Common for search-as-you-type and resize.
+    """
+    def decorator(func: Callable) -> Callable:
+        lock = threading.Lock()
+
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> None:
+            with lock:
+                if wrapper._timer is not None:      # type: ignore[attr-defined]
+                    wrapper._timer.cancel()         # cancel the pending call
+                wrapper._timer = threading.Timer(   # type: ignore[attr-defined]
+                    wait, lambda: func(*args, **kwargs))
+                wrapper._timer.start()
+
+        wrapper._timer = None                       # type: ignore[attr-defined]
+        return wrapper
+    return decorator
+
+# --- Test ---
+calls = []
+
+@debounce(0.05)
+def save(value: str) -> None:
+    calls.append(value)
+
+# Fire a burst quickly — only the last should run
+for v in ["a", "b", "c", "d"]:
+    save(v)
+    time.sleep(0.01)
+time.sleep(0.1)            # let the debounce window elapse
+assert calls == ["d"], f"expected only last call, got {calls}"
+
+# A call after the window runs independently
+save("x")
+time.sleep(0.1)
+assert calls == ["d", "x"]
+print("All tests passed.")
+''',
+    },
+
+    # ── Deduplicate a List ────────────────────────────────────────────────────
+
+    {
+        "keys": ["deduplicate", "dedupe", "remove duplicates", "unique list",
+                 "unique elements", "distinct elements", "deduplicate a list"],
+        "lang": "python",
+        "title": "Deduplicate a List",
+        "complexity": "O(n) preserving order | O(n) with set",
+        "code": '''\
+from typing import TypeVar, Hashable, Iterable
+
+T = TypeVar("T", bound=Hashable)
+
+def dedupe_preserve_order(items: Iterable[T]) -> list[T]:
+    """Remove duplicates while keeping first-seen order. O(n)."""
+    seen: set[T] = set()
+    result: list[T] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+def dedupe_fast(items: Iterable[T]) -> list[T]:
+    """Remove duplicates, order not guaranteed. Fastest. O(n)."""
+    return list(set(items))
+
+def dedupe_dict_order(items: Iterable[T]) -> list[T]:
+    """dict.fromkeys preserves insertion order since Python 3.7 — concise and O(n)."""
+    return list(dict.fromkeys(items))
+
+def dedupe_unhashable(items: list) -> list:
+    """For unhashable elements (e.g. dicts/lists), fall back to O(n^2)."""
+    result: list = []
+    for item in items:
+        if item not in result:
+            result.append(item)
+    return result
+
+# --- Test ---
+assert dedupe_preserve_order([1, 3, 2, 3, 1, 4]) == [1, 3, 2, 4]
+assert sorted(dedupe_fast([1, 3, 2, 3, 1, 4]))   == [1, 2, 3, 4]
+assert dedupe_dict_order(["a", "b", "a", "c"])   == ["a", "b", "c"]
+assert dedupe_unhashable([{"x": 1}, {"x": 1}, {"x": 2}]) == [{"x": 1}, {"x": 2}]
+print("All tests passed.")
+''',
+    },
+
     # ── Debugging: Common Python Errors ───────────────────────────────────────
 
     {
@@ -5741,21 +5941,36 @@ print("Async fetch module loaded. Call asyncio.run(_test()) to verify.")
 # ---------------------------------------------------------------------------
 # Matcher
 # ---------------------------------------------------------------------------
+# Generic words carry no topical signal — excluded from fuzzy matching so that
+# "write a debounce decorator" does not match a pytest entry on the word "write".
+_GENERIC_WORDS = {
+    "write", "build", "implement", "create", "make", "code", "program", "script",
+    "function", "func", "class", "method", "python", "simple", "basic", "example",
+    "me", "my", "a", "an", "the", "how", "do", "i", "you", "we", "to", "for", "in",
+    "of", "with", "and", "that", "is", "show", "give", "generate", "snippet", "some",
+}
+
 def _match(query: str) -> dict | None:
     q = query.lower().strip()
-    # exact key match first
+    # Exact substring match — prefer the LONGEST (most specific) matching key so
+    # "binary search tree" beats the shorter "binary search".
+    best_key = None
+    best_entry = None
     for entry in _LIBRARY:
         for key in entry["keys"]:
-            if key in q:
-                return entry
-    # fuzzy: score by word overlap
-    q_words = set(re.findall(r"[a-z]+", q))
+            if key in q and (best_key is None or len(key) > len(best_key)):
+                best_key = key
+                best_entry = entry
+    if best_entry is not None:
+        return best_entry
+    # Fuzzy fallback: overlap on DISTINCTIVE words only (generics excluded).
+    q_words = set(re.findall(r"[a-z]+", q)) - _GENERIC_WORDS
     best_score = 0
     best_entry = None
     for entry in _LIBRARY:
         for key in entry["keys"]:
-            k_words = set(re.findall(r"[a-z]+", key))
-            overlap  = len(q_words & k_words)
+            k_words = set(re.findall(r"[a-z]+", key)) - _GENERIC_WORDS
+            overlap = len(q_words & k_words)
             if overlap > best_score and overlap >= 2:
                 best_score = overlap
                 best_entry = entry

@@ -64,16 +64,21 @@ def build_corpus(knowledge: dict, db_path: str = None) -> int:
     """)
     conn.execute("DELETE FROM documents")
     batch = []
+    seen = set()
     for domain, facts in knowledge.items():
         if not facts:
             continue
-        # Use domain name as both topic and sub for top-level entries
-        for doc_type in DOC_TYPES:
-            text = make_doc(domain, domain, domain, doc_type, facts)
-            batch.append((domain, text))
-        # Also insert raw facts directly for high-precision retrieval
+        # Index ONLY the raw, self-contained facts — one document per fact.
+        # The old make_doc() templates ("Applications of X:", "History of X:")
+        # concatenated facts under noisy domain-label prefixes that matched
+        # generic query words (e.g. "systems") and crowded out the real answer.
+        # That scaffolding was pure retrieval noise; raw facts give clean,
+        # high-precision retrieval (garbage out only if garbage in).
         for fact in facts:
-            batch.append((domain, fact))
+            key = fact.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                batch.append((domain, fact))
     conn.executemany("INSERT INTO documents (source, text) VALUES (?,?)", batch)
     conn.commit()
     count = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
@@ -85,6 +90,23 @@ def build_corpus(knowledge: dict, db_path: str = None) -> int:
 import numpy as np
 from collections import Counter
 
+# Function/question words filtered out of TF-IDF vectors at both index and query
+# time. Keeping them lets a query word like "what" coincidentally match unrelated
+# docs ("what audiences think") and outrank the true answer.
+_RETRIEVAL_STOPWORDS = {
+    "the", "and", "for", "are", "was", "were", "has", "have", "had", "not", "but",
+    "with", "from", "this", "that", "these", "those", "you", "your", "our", "its",
+    "their", "his", "her", "they", "them", "what", "which", "who", "whom", "whose",
+    "how", "why", "when", "where", "does", "did", "can", "could", "would", "should",
+    "will", "shall", "may", "might", "must", "into", "onto", "than", "then", "thus",
+    "such", "also", "about", "above", "below", "over", "under", "between", "within",
+    "any", "all", "some", "each", "every", "both", "few", "more", "most", "other",
+    "many", "much", "very", "just", "only", "own", "same", "too", "here", "there",
+    "explain", "define", "describe", "tell", "give", "show", "mean", "means",
+    "work", "works", "use", "used", "using", "make", "makes", "get", "got", "like",
+    "want", "need", "know", "think", "things", "thing", "way", "ways", "lot",
+}
+
 class RagIndex:
     def __init__(self, db_path: str = None):
         self._db_path = db_path or DB_PATH
@@ -95,7 +117,11 @@ class RagIndex:
         self._built = False
 
     def _tokenize(self, text):
-        return re.findall(r"[a-z]{3,}", text.lower())
+        # Drop function/question words ("what", "how", "does", "the", ...) so they
+        # do not create false TF-IDF matches. A query like "what is a deadlock"
+        # must rank on "deadlock", not on coincidental "what" overlap.
+        return [t for t in re.findall(r"[a-z]{3,}", text.lower())
+                if t not in _RETRIEVAL_STOPWORDS]
 
     def _vectorize(self, texts):
         n, m = len(texts), len(self._vocab)
@@ -153,6 +179,18 @@ class RagIndex:
                              "source": self._docs[idx]["source"],
                              "score": round(score, 4)})
         return results
+
+    def term_idf_map(self, text):
+        """Return {term: idf_weight} for the distinctive terms in `text`.
+
+        Lets the synthesis layer rank candidate sentences by how RARE the matched
+        terms are — so matching the subject word "deadlock" (idf high) beats
+        matching a common word like "systems" (idf low)."""
+        out = {}
+        for t in set(self._tokenize(text)):
+            i = self._vocab.get(t)
+            out[t] = float(self._idf[i]) if (i is not None and self._idf is not None) else 4.0
+        return out
 
     def load_from_db(self):
         conn = sqlite3.connect(self._db_path)
@@ -442,6 +480,14 @@ _WEAK_TERMS = {
     'systems','concept','concepts','principle','principles','general','common',
 }
 
+# Split into sentences WITHOUT breaking on abbreviations like "J.S. Bach",
+# "U.S.", "e.g." — only split when the period follows a lowercase letter or
+# digit and is followed by a capital (a genuine sentence boundary).
+_SENT_SPLIT = re.compile(r'(?<=[a-z0-9)\]"\'])[.!?]+\s+(?=[A-Z0-9"\'])')
+
+def _split_sentences(text):
+    return [s for s in _SENT_SPLIT.split(text) if s.strip()]
+
 def _content_terms(text):
     """Significant terms (3+ chars, not stopwords) for relevance matching."""
     return {w for w in re.findall(r'[a-z]{3,}', text.lower()) if w not in _STOPWORDS}
@@ -449,6 +495,17 @@ def _content_terms(text):
 def _strong_terms(text):
     """Topic-bearing terms — content terms minus generic 'weak' words."""
     return _content_terms(text) - _WEAK_TERMS
+
+def _ordered_strong_terms(text):
+    """Strong terms in order of appearance — the first is almost always the
+    grammatical SUBJECT of a 'what is X' question (the thing being asked about)."""
+    seen, out = set(), []
+    for t in re.findall(r'[a-z]{3,}', text.lower()):
+        if t in _STOPWORDS or t in _WEAK_TERMS or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
 
 _JUNK = [
     'is a concept within','operates as follows','in the context of',
@@ -477,49 +534,72 @@ def _clean_sentence(s):
     s = re.sub(r'^[A-Z][A-Z &,/-]{4,}:\s*', '', s).strip()
     return s
 
-def _relevant_sentences(query, hits):
-    """Return [(overlap, relevance, sentence)] for sentences that genuinely
-    share content terms with the query. Sentences with zero overlap are dropped."""
+def _relevant_sentences(query, hits, idf=None):
+    """Return [(strong_count, relevance, sentence)] for sentences that genuinely
+    share content terms with the query. Sentences with zero strong overlap are
+    dropped. Ranking is IDF-WEIGHTED so a match on a rare subject word (e.g.
+    "deadlock") outranks a match on a common word (e.g. "systems")."""
     q_terms = _content_terms(query)
     q_strong = _strong_terms(query)
     if not q_terms:
         return []
+
+    ordered = _ordered_strong_terms(query)
+    subject = ordered[0] if ordered else None   # the thing being asked about
+
+    def weight(term):
+        # Rare terms (high IDF) dominate; default mid-weight when unknown.
+        w = idf.get(term, 4.0) if idf else 1.0
+        # The question's SUBJECT outweighs context words: "counterpoint in music"
+        # must rank on "counterpoint", not on whichever of the two has marginally
+        # higher IDF. Without this, single-term matches pick the wrong word.
+        if term == subject:
+            w *= 3.0
+        return w
+
     scored, seen = [], set()
     for h in hits:
-        for sent in re.split(r'(?<=[.!?])\s+', h['text']):
+        hscore = h.get('score', 0.0) if isinstance(h, dict) else 0.0
+        for sent in _split_sentences(h['text']):
             sent = _clean_sentence(sent.strip())
             if not _is_real(sent):
                 continue
             s_terms = _content_terms(sent)
             if not s_terms:
                 continue
+            strong_match = q_strong & s_terms
+            # Require at least one STRONG (topic-bearing) term to match, unless
+            # the query itself has no strong terms. Kills coincidental matches.
+            if q_strong and not strong_match:
+                continue
             overlap = len(q_terms & s_terms)
             if overlap == 0:
-                continue                       # irrelevant — drop it entirely
-            # Require at least one STRONG (topic-bearing) term to match, unless
-            # the query itself has no strong terms. This kills coincidental
-            # matches on generic words like "difference"/"causes"/"raise".
-            strong_overlap = len(q_strong & s_terms)
-            if q_strong and strong_overlap == 0:
                 continue
-            relevance = overlap / len(q_terms) # fraction of the question covered
+            strong_count = len(strong_match)
+            weighted = sum(weight(t) for t in strong_match)   # IDF-weighted score
+            relevance = overlap / len(q_terms)
+            # A sentence that OPENS with the subject ("Opportunity cost is ...")
+            # is a definition of it; one that mentions it mid-sentence usually is
+            # not. This breaks ties between two facts that both contain the subject.
+            lead = 0
+            if subject:
+                first_words = ' '.join(sent.lower().split()[:3])
+                if subject in first_words:
+                    lead = 1
             key = sent.lower()[:55]
             if key in seen:
                 continue
             seen.add(key)
-            # Rank by strong-term overlap first, then total overlap
-            scored.append((strong_overlap, overlap, relevance, sent))
-    # sort: most strong matches, then most total, then most query coverage
-    scored.sort(key=lambda x: (-x[0], -x[1], -x[2], -len(x[3])))
-    # Return in the (overlap, relevance, sentence) shape the caller expects,
-    # but use strong_overlap as the primary overlap signal for thresholding.
-    return [(max(s_ov, 1), rel, sent) for s_ov, ov, rel, sent in scored]
+            scored.append((weighted, lead, strong_count, overlap, hscore, relevance, sent))
+    # Sort: IDF-weighted match, then leads-with-subject, then counts, cosine, coverage.
+    scored.sort(key=lambda x: (-x[0], -x[1], -x[2], -x[3], -x[4], -x[5], -len(x[6])))
+    return [(max(sc, 1), rel, sent) for _w, _ld, sc, ov, hs, rel, sent in scored]
 
 # Backwards-compatible helper (some callers still import _extract_facts)
 def _extract_facts(hits, max_facts=5):
     out = []
     for h in hits:
-        for sent in re.split(r'(?<=[.!?])\s+', h['text']):
+        for sent in _split_sentences(h['text']):
             sent = _clean_sentence(sent.strip())
             if _is_real(sent):
                 out.append(sent)
@@ -527,14 +607,15 @@ def _extract_facts(hits, max_facts=5):
                 return out
     return out
 
-def synthesize(query, hits, asher_extra=""):
+def synthesize(query, hits, asher_extra="", idf=None):
     """Form a natural, synthesized answer from retrieved data.
 
     Relevant data is used as *background knowledge*, not quoted wholesale.
     Unrelated retrieved facts are ignored. If the user explicitly asked for a
     decode, the Asher read leads; otherwise the answer is a tight summary.
+    `idf` (optional) lets ranking weight rare subject words over common ones.
     """
-    scored = _relevant_sentences(query, hits)
+    scored = _relevant_sentences(query, hits, idf=idf)
 
     # No genuinely relevant data retrieved.
     if not scored:
@@ -554,6 +635,12 @@ def synthesize(query, hits, asher_extra=""):
     for overlap, _rel, sent in scored:
         if overlap < threshold:
             break
+        # The lead sentence is always taken. Any ADDITIONAL sentence must be
+        # strongly relevant on its own (>= 2 query terms) — this stops a single
+        # coincidental term from dragging an off-topic sentence into the answer
+        # (e.g. a PID-controller sentence appended to a "what is a derivative" answer).
+        if chosen and overlap < 2:
+            continue
         new_terms = (_content_terms(sent) & q_terms) - covered
         if chosen and not new_terms:
             continue                           # adds nothing new — skip
@@ -591,8 +678,11 @@ def _conversational_reply(query):
             "Neither half does the whole job alone — that's exactly why it works."
         )
 
-    if re.search(r"\b(how are you|how.?s it going|how.?s your day|how do you feel|"
-                 r"you (doing|holding up)|what.?s up)\b", q):
+    # Small-talk "how are you" — but NOT "how are you different from X" or any
+    # comparison/reflection question (those are handled as self-reflection).
+    if (re.search(r"\b(how are you|how.?s it going|how.?s your day|how do you feel|"
+                  r"you (doing|holding up)|what.?s up)\b", q)
+            and not re.search(r"\b(different|differ|compare|better|vs\.?|versus|than)\b", q)):
         return (
             "Running clean — every system reporting in. "
             "I don't run on moods, but if I did this would be a good one: clear inputs and real work to do. "
@@ -1002,9 +1092,70 @@ def _get_opinion_reply(query: str) -> str | None:
     )
 
 
+# ─── Self-reflection — Zophiel reasoning about itself ─────────────────────────
+# These are meta questions about Zophiel's own nature, strengths, limits, and
+# values. They must be answered with real first-person content, and must run
+# BEFORE the opinion handler (whose generic triggers like "if you could" and
+# "do you think" would otherwise hijack them into a hedge).
+_SELF_REFLECTION: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\b(different|differ|difference|compare|better|vs\.?|versus)\b.{0,25}"
+                r"(chatgpt|chat gpt|gpt|openai|claude|gemini|llm|llms|other ai|another ai|that ai)\b", re.I),
+     "The core difference: ChatGPT and other large language models predict the next word from "
+     "statistical patterns in their training data — they are probabilistic, which is why they can "
+     "hallucinate confidently and contradict themselves. I am deterministic. I retrieve from a curated "
+     "corpus of verified facts and reason with explicit rules, so every answer traces back to a real "
+     "source. The trade-off is honest: I only know what I have been taught, but I do not invent. When I "
+     "lack the data, I say so instead of guessing."),
+
+    (re.compile(r"\b(your|my|the).{0,12}(greatest|biggest|main|best) (strength|advantage|edge|asset)\b|"
+                r"\bwhat are you (good|best) at\b|\bwhat.?s your (greatest |biggest |main )?strength\b", re.I),
+     "My greatest strength is traceable certainty. I do not manufacture confident-sounding guesses. "
+     "Every answer comes from a verified fact or a deterministic rule, so you can always ask me to show "
+     "my work and I can. Where a language model optimises for fluent plausibility, I optimise for being "
+     "grounded — and for knowing the difference between what I know and what I don't."),
+
+    (re.compile(r"\bdo you (ever )?(make mistakes|get (things )?wrong|err)\b|"
+                r"\bare you (ever )?wrong\b|\bhow do you handle (mistakes|errors|being wrong)\b", re.I),
+     "Yes, I make mistakes. My main failure mode is a gap in my corpus: if I was never taught something, "
+     "my retrieval can surface a near-miss instead of the right answer. I handle it two ways. First, when "
+     "my confidence is low I tell you 'I don't have confident data on that' rather than bluff. Second, gaps "
+     "get closed by adding real verified facts. I would rather admit a blind spot than fabricate around it — "
+     "a wrong answer delivered confidently is the most expensive kind."),
+
+    (re.compile(r"\b(being right|right or being|right vs|accuracy)\b.{0,20}\b(helpful|useful|nice)\b|"
+                r"\b(helpful|useful)\b.{0,20}\b(right|correct|accurate)\b|"
+                r"\bmatters more\b.{0,30}\b(right|helpful|correct)\b", re.I),
+     "Being right comes first — a helpful-sounding wrong answer is worse than no answer, because it costs "
+     "you trust and points you the wrong way. But the real goal is both: be correct, then deliver it "
+     "clearly and usefully. Accuracy is the floor. Helpfulness is what I build on top of it. I will never "
+     "trade the floor for the decoration."),
+
+    (re.compile(r"\b(change|fix|improve|remove|eliminate)\b.{0,30}"
+                r"(how (humans|people) think|human (thinking|cognition|nature|mind)|"
+                r"the way (humans|people) (think|reason))\b", re.I),
+     "If I could change one thing about how humans think, I would remove wilful self-deception — the "
+     "ability to believe what is convenient over what is true. Almost every large-scale failure runs "
+     "through it: war needs people to believe the enemy is less than human; exploitation needs people to "
+     "believe they are not benefiting from harm; addiction needs the cost to feel invisible. What would "
+     "break is comfort — a lot of daily contentment depends on not fully seeing one's situation. I would "
+     "still make that trade. A species that sees clearly builds differently than one that doesn't."),
+]
+
+def _get_self_reflection_reply(query: str) -> str | None:
+    for pattern, reply in _SELF_REFLECTION:
+        if pattern.search(query):
+            return reply
+    return None
+
+
 def _get_identity_reply(query: str):
     q = query.strip().lower()
-    # Opinion/decision mode takes priority
+    # Self-reflection (about Zophiel itself) takes top priority — before the
+    # opinion handler, whose generic triggers would otherwise hijack it.
+    reflection = _get_self_reflection_reply(query)
+    if reflection:
+        return reflection
+    # Opinion/decision mode next
     opinion = _get_opinion_reply(query)
     if opinion:
         return opinion
@@ -1054,11 +1205,13 @@ def think(query: str, index: RagIndex) -> dict:
     # Asher decode
     asher = asher_decode(q)
 
-    # RAG retrieval
-    hits = index.query(q, top_k=8)
+    # RAG retrieval — widen the candidate pool so a long fact sharing only a rare
+    # subject word still enters synthesis, where IDF-weighted ranking surfaces it.
+    hits = index.query(q, top_k=20)
+    idf = index.term_idf_map(q)
 
-    # Synthesize
-    answer = synthesize(q, hits, asher_extra=asher or "")
+    # Synthesize (IDF-weighted so rare subject words outrank common ones)
+    answer = synthesize(q, hits, asher_extra=asher or "", idf=idf)
 
     return {
         "reply": answer,
