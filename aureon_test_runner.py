@@ -132,7 +132,10 @@ class RagIndex:
         # Drop function/question words ("what", "how", "does", "the", ...) so they
         # do not create false TF-IDF matches. A query like "what is a deadlock"
         # must rank on "deadlock", not on coincidental "what" overlap.
-        return [_normalize_token(t) for t in re.findall(r"[a-z]{3,}", text.lower())
+        # 2+ letters (NOT 3+): the index must file documents under two-letter
+        # subjects like "ai"/"vr"/"os" too, or the query side finally knowing it
+        # wants "ai" still finds nothing filed under it. Must match _content_terms.
+        return [_normalize_token(t) for t in re.findall(r"[a-z]{2,}", text.lower())
                 if t not in _RETRIEVAL_STOPWORDS]
 
     def _vectorize(self, texts):
@@ -476,6 +479,18 @@ _STOPWORDS = {
     'things','way','ways','use','using','used','let','lets','know','think','said',
 }
 
+# Two-letter function words and contraction fragments. Now that the tokenizer
+# keeps 2-letter tokens (so "AI"/"VR"/"OS" survive), these must be dropped or they
+# would pollute matching. Real two-letter subjects (ai, vr, ui, os, ml, ...) are
+# deliberately NOT here.
+_SHORT_FUNCTION_WORDS = {
+    'of','to','in','is','it','on','at','or','if','do','as','by','me','my','we','us',
+    'he','so','no','up','an','be','am','ax','ye','oh','ah','eh','hi','um','uh','yo',
+    'ya','re','ve','ll','nt','st','nd','rd','th',
+}
+_STOPWORDS |= _SHORT_FUNCTION_WORDS
+_RETRIEVAL_STOPWORDS |= _SHORT_FUNCTION_WORDS
+
 # Weak terms: real words but too generic to establish topical relevance on their
 # own. A sentence matching ONLY weak terms (e.g. "difference", "causes", "raise")
 # is not actually about the query — it's a coincidence. We require at least one
@@ -503,10 +518,18 @@ _SENT_SPLIT = re.compile(r'(?<=[a-z0-9)\]"\'])[.!?]+\s+(?=[A-Z0-9"\'])')
 def _split_sentences(text):
     return [s for s in _SENT_SPLIT.split(text) if s.strip()]
 
+# Keep 2+ letter tokens, NOT 3+. The old [a-z]{3,} rule silently deleted every
+# two-letter subject — and the single most important topic in the corpus, "AI",
+# is two letters. With it gone, "explain AI to me" became subject-less and the
+# retriever returned random facts. Two-letter function words ("of","to","is"...)
+# are dropped by the stopword list, so "ai","vr","ui","os","ml" survive while
+# "is"/"of"/"to"/"me" still do not.
+_TOKEN_RE = re.compile(r'[a-z]{2,}')
+
 def _content_terms(text):
-    """Significant terms (3+ chars, not stopwords) for relevance matching.
+    """Significant terms (2+ letters, not stopwords) for relevance matching.
     Plural-normalized so 'muscles' and 'muscle' count as the same term."""
-    return {_normalize_token(w) for w in re.findall(r'[a-z]{3,}', text.lower())
+    return {_normalize_token(w) for w in _TOKEN_RE.findall(text.lower())
             if w not in _STOPWORDS}
 
 def _strong_terms(text):
@@ -517,7 +540,7 @@ def _ordered_strong_terms(text):
     """Strong terms in order of appearance — the first is almost always the
     grammatical SUBJECT of a 'what is X' question (the thing being asked about)."""
     seen, out = set(), []
-    for t in re.findall(r'[a-z]{3,}', text.lower()):
+    for t in _TOKEN_RE.findall(text.lower()):
         if t in _STOPWORDS or t in _WEAK_TERMS or t in seen:
             continue
         seen.add(t)
@@ -559,6 +582,15 @@ def _relevant_sentences(query, hits, idf=None):
     q_terms = _content_terms(query)
     q_strong = _strong_terms(query)
     if not q_terms:
+        return []
+
+    # FAIL SAFE: if the query has no strong subject term at all, the topic is
+    # genuinely absent (or was lost). Returning nothing lets synthesize give the
+    # honest "I don't have a confident read" answer. Previously an empty q_strong
+    # silently DISABLED the per-sentence relevance guard below (a falsy q_strong
+    # short-circuits `if q_strong and ...`), opening the floodgates to unrelated
+    # facts. Losing the subject must close the gate, never open it.
+    if not q_strong:
         return []
 
     ordered = _ordered_strong_terms(query)
