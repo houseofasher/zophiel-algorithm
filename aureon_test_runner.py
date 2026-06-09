@@ -120,7 +120,17 @@ class RagIndex:
         df = Counter()
         for doc in docs:
             df.update(set(self._tokenize(doc["text"])))
-        terms = [t for t, c in df.most_common() if 1 <= c < 0.95 * n][:3000]
+        # Keep every term that appears in 1..95% of docs. Distinctive RARE terms
+        # (e.g. "udp", "eutrophication", "tenon") carry the HIGHEST IDF and are
+        # exactly what lets retrieval disambiguate — never drop them in favour of
+        # common words. Cap is generous and, if hit, prefers rarer terms.
+        candidates = [(t, c) for t, c in df.items() if 1 <= c < 0.95 * n]
+        VOCAB_CAP = 50000
+        if len(candidates) > VOCAB_CAP:
+            # Keep the rarest (most discriminative) terms when over the cap.
+            candidates.sort(key=lambda tc: tc[1])
+            candidates = candidates[:VOCAB_CAP]
+        terms = [t for t, _ in candidates]
         self._vocab = {t: i for i, t in enumerate(terms)}
         self._idf = np.array(
             [np.log((n + 1) / (df[t] + 1)) + 1.0 for t in terms], dtype=np.float32
@@ -602,7 +612,7 @@ _IDENTITY_RESPONSES = {
     "who are you": (
         "I am Zophiel — a sovereign AI intelligence built on deterministic reasoning. "
         "I am not a wrapper around GPT or any neural language model. "
-        "My architecture runs TF-IDF retrieval over a curated 29,741-document corpus across 54 domains, "
+        "My architecture runs TF-IDF retrieval over a curated corpus of verified facts across 80 domains, "
         "paired with the Asher 3-layer decode engine and a fast-path for math and constants. "
         "I reason from evidence. When I don't know something, I say so."
     ),

@@ -1,0 +1,654 @@
+"""
+build_taxonomy_corpus.py — High-quality knowledge generator for Zophiel
+========================================================================
+Generates DENSE, FACTUAL knowledge for every domain in
+TAXONOMY_v30_COMPLETE_ALL_DOMAINS.txt and merges it into the main corpus.
+
+DESIGN RULE (the whole point of this file):
+  Every entry is a SPECIFIC, TRUE, self-contained fact — a definition, a
+  mechanism, a number, a law, or a named relationship. NO institutional
+  boilerplate. NO "X is a concept that operates within the field of X."
+  If a sentence does not teach something real, it does not belong here.
+
+Run:  python build_taxonomy_corpus.py
+      -> writes data/taxonomy_knowledge.json
+      -> merges into data/corpus_knowledge.json (deduplicated)
+"""
+from __future__ import annotations
+import json
+import os
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent
+DATA = BASE / "data"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# KNOWLEDGE — keyed by taxonomy domain. Each value is a list of real facts.
+# ──────────────────────────────────────────────────────────────────────────────
+DOMAINS: dict[str, list[str]] = {}
+
+# ── DOMAIN 01 — SCIENCE & NATURAL PHILOSOPHY ─────────────────────────────────
+DOMAINS["PHYSICS & NATURAL SCIENCE"] = [
+    "The Pauli exclusion principle states that no two identical fermions can occupy the same quantum state simultaneously, which is why electrons fill atomic orbitals in shells rather than collapsing into the lowest level.",
+    "Nuclear fusion in the Sun's core fuses four hydrogen nuclei into one helium nucleus via the proton-proton chain, converting about 0.7% of the mass to energy (E=mc^2) and releasing roughly 26 MeV per helium nucleus formed.",
+    "The Sun fuses about 600 million tonnes of hydrogen per second at a core temperature near 15 million Kelvin and a pressure of around 250 billion atmospheres.",
+    "Newton's three laws: an object stays at rest or constant velocity unless acted on by a net force; F = ma; and every action has an equal and opposite reaction.",
+    "The Lagrangian L = T - V (kinetic minus potential energy) and the Euler-Lagrange equation reformulate mechanics so that a system's true path extremizes the action integral.",
+    "Noether's theorem links every continuous symmetry to a conservation law: time-translation symmetry gives energy conservation, spatial symmetry gives momentum conservation, and rotational symmetry gives angular momentum conservation.",
+    "The second law of thermodynamics states that the entropy of an isolated system never decreases; this defines the thermodynamic arrow of time.",
+    "Carnot efficiency, 1 - T_cold/T_hot, is the maximum possible efficiency of any heat engine operating between two temperatures, and no real engine can exceed it.",
+    "Maxwell's four equations unify electricity and magnetism and predict electromagnetic waves traveling at c = 299,792,458 m/s, identifying light as an electromagnetic wave.",
+    "The Heisenberg uncertainty principle, delta_x * delta_p >= hbar/2, sets a fundamental limit: the more precisely a particle's position is known, the less precisely its momentum can be known.",
+    "The Schrodinger equation describes how a quantum wavefunction evolves in time; the square of its amplitude |psi|^2 gives the probability density of finding the particle.",
+    "Quantum entanglement correlates particles so that measuring one instantly determines the state of the other regardless of distance, a phenomenon Einstein called 'spooky action at a distance' and confirmed by Bell-inequality violations.",
+    "Special relativity shows that time dilates and length contracts for objects moving near light speed, and that simultaneity is relative to the observer's frame.",
+    "General relativity describes gravity not as a force but as the curvature of spacetime caused by mass and energy; it predicts gravitational lensing, time dilation near massive bodies, and gravitational waves.",
+    "The Standard Model of particle physics classifies matter into six quarks, six leptons, and force-carrying bosons (photon, gluon, W, Z), with the Higgs boson giving particles mass.",
+    "Conservation of momentum means the total momentum of a closed system stays constant; in an elastic collision kinetic energy is also conserved, while in an inelastic collision some is lost to heat or deformation.",
+    "Bernoulli's principle states that in a flowing fluid, regions of higher velocity have lower pressure, which explains lift on an airfoil.",
+    "The Stefan-Boltzmann law states that the power radiated by a black body is proportional to the fourth power of its absolute temperature (P = sigma*T^4).",
+    "Entropy in statistical mechanics is S = k ln W, where W is the number of microstates corresponding to a macrostate, linking disorder to probability.",
+    "Absolute zero (0 Kelvin, -273.15 C) is the temperature at which molecular motion reaches its quantum-mechanical minimum; the third law says it cannot be reached in finite steps.",
+]
+
+DOMAINS["CHEMISTRY & MATERIALS"] = [
+    "The periodic table arranges elements by atomic number; periodicity in electron configuration drives trends in electronegativity, atomic radius, and ionization energy.",
+    "Covalent bonds share electron pairs, ionic bonds transfer electrons creating charged ions held by electrostatic attraction, and metallic bonds pool delocalized electrons that conduct electricity.",
+    "Le Chatelier's principle: a system at equilibrium responds to an imposed change in concentration, temperature, or pressure by shifting to partially counteract that change.",
+    "Gibbs free energy delta_G = delta_H - T*delta_S predicts spontaneity; a reaction proceeds spontaneously when delta_G is negative.",
+    "Oxidation is loss of electrons and reduction is gain of electrons; in a redox reaction the oxidizing agent is reduced and the reducing agent is oxidized.",
+    "The pH scale measures hydrogen ion concentration logarithmically; pH 7 is neutral, below 7 acidic, above 7 basic, and each unit represents a tenfold change.",
+    "Catalysts speed reactions by lowering activation energy without being consumed; enzymes are biological catalysts that can accelerate reactions millions of times.",
+    "Avogadro's number, 6.022 x 10^23, is the count of particles in one mole, linking atomic-scale mass to gram-scale measurement.",
+    "Organic chemistry centers on carbon's ability to form four covalent bonds and long chains; functional groups like hydroxyl, carboxyl, and amine determine molecular behavior.",
+    "Chirality means a molecule is non-superimposable on its mirror image; the two enantiomers can have drastically different biological effects, as in thalidomide.",
+    "Polymers are long chains of repeating monomer units; polymerization can be addition (as in polyethylene) or condensation (as in nylon, releasing a small molecule).",
+    "The ideal gas law PV = nRT relates pressure, volume, moles, and temperature; real gases deviate at high pressure and low temperature.",
+    "Entropy-driven processes like dissolution and mixing increase disorder even when energetically neutral, which is why some endothermic reactions still occur spontaneously.",
+    "Spectroscopy identifies substances by how they absorb or emit specific wavelengths; each element has a unique spectral fingerprint.",
+    "Stoichiometry uses balanced equations to predict reactant and product quantities, conserving mass and atom count across the reaction.",
+]
+
+DOMAINS["BIOLOGY & LIFE SCIENCE"] = [
+    "DNA stores genetic information in sequences of four bases (A, T, G, C); the double helix's complementary base pairing (A-T, G-C) enables faithful replication.",
+    "The central dogma of molecular biology: DNA is transcribed into messenger RNA, which is translated by ribosomes into proteins built from amino acids.",
+    "Natural selection drives evolution: heritable variations that improve survival and reproduction become more common over generations, as Darwin described in 1859.",
+    "Cellular respiration converts glucose and oxygen into ATP, water, and carbon dioxide, with the electron transport chain producing most of the roughly 30-32 ATP per glucose.",
+    "Photosynthesis converts carbon dioxide, water, and light energy into glucose and oxygen; the light reactions occur in thylakoid membranes and the Calvin cycle fixes carbon in the stroma.",
+    "Mitosis produces two genetically identical diploid cells for growth and repair, while meiosis produces four genetically diverse haploid gametes for sexual reproduction.",
+    "Mendel's laws of segregation and independent assortment explain how dominant and recessive alleles pass to offspring in predictable ratios.",
+    "Enzymes lower activation energy and are specific to their substrates via a lock-and-key or induced-fit mechanism; their activity depends on temperature and pH.",
+    "The cell membrane is a phospholipid bilayer with embedded proteins; it controls transport via diffusion, osmosis, active transport, and endocytosis.",
+    "Homeostasis maintains stable internal conditions through negative feedback loops, such as insulin and glucagon regulating blood glucose.",
+    "Ecosystems cycle energy from producers to consumers to decomposers, losing about 90% of energy at each trophic level, which limits food chain length.",
+    "Antibiotic resistance evolves when bacteria with resistance mutations survive treatment and proliferate; overuse of antibiotics accelerates this selection.",
+    "The nervous system transmits signals as electrochemical action potentials; neurotransmitters carry the signal across synapses between neurons.",
+    "CRISPR-Cas9 uses a guide RNA to direct the Cas9 nuclease to a specific DNA sequence, allowing precise cutting and editing of genes.",
+    "Proteins fold into specific three-dimensional shapes determined by their amino acid sequence; misfolding causes diseases like Alzheimer's and prion disorders.",
+]
+
+DOMAINS["MATHEMATICS & LOGIC"] = [
+    "The Pythagorean theorem states that in a right triangle the square of the hypotenuse equals the sum of the squares of the other two sides (a^2 + b^2 = c^2).",
+    "Calculus has two branches: differentiation finds instantaneous rates of change (slopes), and integration finds accumulated quantities (areas); the fundamental theorem links them as inverse operations.",
+    "A prime number has exactly two divisors, 1 and itself; Euclid proved there are infinitely many primes, and they are the multiplicative building blocks of all integers.",
+    "Godel's incompleteness theorems prove that any consistent formal system powerful enough for arithmetic contains true statements it cannot prove.",
+    "The derivative of a function measures its instantaneous slope; the derivative of x^n is n*x^(n-1), a core rule of differentiation.",
+    "Bayes' theorem updates the probability of a hypothesis given new evidence: P(H|E) = P(E|H)*P(H)/P(E).",
+    "A function is continuous if small input changes produce small output changes; differentiability is stronger and implies continuity but not vice versa.",
+    "The set of real numbers is uncountable, proven by Cantor's diagonal argument, while the rationals and integers are countably infinite.",
+    "Euler's identity, e^(i*pi) + 1 = 0, links five fundamental constants and is often cited as the most beautiful equation in mathematics.",
+    "Modus ponens is the valid inference 'if P then Q; P; therefore Q,' while modus tollens infers 'if P then Q; not Q; therefore not P.'",
+    "De Morgan's laws state that not(A and B) equals (not A) or (not B), and not(A or B) equals (not A) and (not B).",
+    "A matrix represents a linear transformation; its determinant measures how it scales area or volume, and a zero determinant means the transformation is non-invertible.",
+    "The normal (Gaussian) distribution is symmetric and bell-shaped; about 68% of values fall within one standard deviation of the mean, 95% within two, and 99.7% within three.",
+    "Group theory studies sets with an operation satisfying closure, associativity, identity, and inverses; it underlies symmetry in physics and cryptography.",
+]
+
+DOMAINS["EARTH & SPACE SCIENCE"] = [
+    "Plate tectonics: Earth's lithosphere is broken into plates that move on the asthenosphere, causing earthquakes, volcanoes, and mountain building at their boundaries.",
+    "The rock cycle transforms rock between igneous (cooled magma), sedimentary (compacted deposits), and metamorphic (heat- and pressure-altered) forms.",
+    "Earth's interior layers are the crust, the mantle, the liquid outer core, and the solid inner core; convection in the outer core generates the magnetic field.",
+    "The water cycle moves water through evaporation, condensation, precipitation, infiltration, and runoff, driven by solar energy and gravity.",
+    "Stars form from collapsing clouds of gas and dust, fuse hydrogen on the main sequence, and end as white dwarfs, neutron stars, or black holes depending on mass.",
+    "The Big Bang model holds that the universe expanded from an extremely hot, dense state about 13.8 billion years ago, evidenced by the cosmic microwave background and galactic redshift.",
+    "A black hole's event horizon lies at the Schwarzschild radius r = 2GM/c^2, beyond which not even light can escape.",
+    "The Milky Way is a barred spiral galaxy about 100,000 light-years across containing 100-400 billion stars; the Sun orbits its center roughly every 225 million years.",
+    "Seasons result from Earth's 23.5-degree axial tilt, not its distance from the Sun, changing the angle and duration of sunlight across the year.",
+    "The greenhouse effect warms Earth as gases like CO2, water vapor, and methane absorb and re-emit infrared radiation; without it Earth would average about -18 C.",
+    "A parsec is 3.26 light-years, the distance at which Earth's orbital radius subtends one arcsecond; it is the standard unit for stellar distances.",
+    "Tides are caused mainly by the Moon's gravitational pull, producing two high and two low tides daily, with the Sun adding spring and neap variations.",
+]
+
+# ── DOMAIN 02 — MEDICINE & HEALTH SCIENCES ───────────────────────────────────
+DOMAINS["MEDICINE & PHYSIOLOGY"] = [
+    "mRNA vaccines deliver lab-made messenger RNA that instructs cells to produce a viral antigen (such as the SARS-CoV-2 spike protein), training the immune system without using live virus.",
+    "Type 2 diabetes develops when cells become resistant to insulin and the pancreas cannot produce enough to compensate, leading to chronically high blood glucose; obesity and inactivity are major risk factors.",
+    "Type 1 diabetes is an autoimmune disease in which the immune system destroys insulin-producing beta cells in the pancreas, requiring lifelong insulin therapy.",
+    "Antibiotics kill or inhibit bacteria but have no effect on viruses; misuse drives antibiotic resistance, so they should not be used for colds or flu.",
+    "The heart's four chambers pump blood in two circuits: the right side sends deoxygenated blood to the lungs, and the left side pumps oxygenated blood to the body.",
+    "Blood pressure is recorded as systolic over diastolic; normal is around 120/80 mmHg, and sustained readings above 130/80 indicate hypertension.",
+    "Vaccination produces immunity by exposing the immune system to a harmless form of a pathogen, generating memory B and T cells for rapid future response; high coverage creates herd immunity.",
+    "Cancer arises from mutations that disable growth control, allowing cells to divide uncontrollably, evade apoptosis, and potentially metastasize to distant tissues.",
+    "Atherosclerosis is the buildup of cholesterol-rich plaque in artery walls, narrowing vessels and raising the risk of heart attack and stroke.",
+    "The kidneys filter blood to remove waste and excess fluid, producing urine and regulating electrolytes, blood pressure, and pH.",
+    "Neurons communicate by releasing neurotransmitters such as dopamine, serotonin, and acetylcholine across synapses; imbalances are linked to depression and Parkinson's disease.",
+    "The liver performs over 500 functions including detoxification, bile production, protein synthesis, and glucose storage as glycogen.",
+    "Inflammation is the immune system's response to injury or infection, marked by redness, heat, swelling, and pain; chronic inflammation contributes to many diseases.",
+    "A stroke occurs when blood flow to part of the brain is blocked (ischemic) or a vessel ruptures (hemorrhagic); rapid treatment limits brain damage.",
+    "Pharmacokinetics describes how the body absorbs, distributes, metabolizes (often via liver CYP450 enzymes), and excretes a drug, determining dosing.",
+    "The immune system has innate (rapid, nonspecific) and adaptive (slower, antigen-specific with memory) branches working together to fight pathogens.",
+]
+
+# ── DOMAIN 03 — TECHNOLOGY & ENGINEERING ─────────────────────────────────────
+DOMAINS["COMPUTER SCIENCE & ENGINEERING"] = [
+    "TCP is a connection-oriented protocol that guarantees ordered, reliable delivery through acknowledgments and retransmission; UDP is connectionless, faster, and used for streaming and gaming where speed matters more than reliability.",
+    "A hash table achieves average O(1) lookup by mapping keys to array indices through a hash function; collisions are handled by chaining or open addressing.",
+    "Big-O notation describes how an algorithm's time or space grows with input size: O(1) constant, O(log n) logarithmic, O(n) linear, O(n log n), O(n^2) quadratic.",
+    "The OSI model has seven layers (physical, data link, network, transport, session, presentation, application) standardizing how networked systems communicate.",
+    "Object-oriented programming organizes code around objects combining data and behavior, using encapsulation, inheritance, and polymorphism.",
+    "A relational database stores data in tables with rows and columns; SQL queries them, and normalization reduces redundancy while foreign keys enforce relationships.",
+    "Public-key cryptography uses a public key to encrypt and a private key to decrypt; RSA relies on the difficulty of factoring large numbers, while ECC uses elliptic curves.",
+    "HTTP is a stateless request-response protocol; HTTPS adds TLS encryption so data between browser and server cannot be read or tampered with in transit.",
+    "Machine learning trains models on data to find patterns; supervised learning uses labeled examples, unsupervised finds structure, and reinforcement learning learns from reward.",
+    "A neural network approximates functions by stacking layers of weighted sums and nonlinear activations; backpropagation adjusts weights by propagating error gradients backward.",
+    "RAM is fast volatile memory cleared on power loss, while storage (SSD/HDD) is slower but persistent; CPUs use cache (L1/L2/L3) to bridge the speed gap.",
+    "Recursion solves a problem by calling itself on smaller subproblems with a base case; each call uses stack space, so deep recursion can overflow the stack.",
+    "Version control like Git tracks code changes as commits, enabling branching, merging, and collaboration with a full history of who changed what and when.",
+    "An operating system manages hardware resources, schedules processes, handles memory with virtual addressing, and provides a file system and system calls.",
+    "Compilers translate source code to machine code ahead of time, while interpreters execute it line by line; just-in-time compilers blend both for speed.",
+    "The CAP theorem states a distributed system can guarantee at most two of consistency, availability, and partition tolerance simultaneously.",
+]
+
+DOMAINS["ENGINEERING & APPLIED TECH"] = [
+    "A jet engine generates thrust by compressing incoming air, mixing it with fuel and igniting it, then expelling hot exhaust backward; by Newton's third law the reaction pushes the engine forward.",
+    "A four-stroke internal combustion engine cycles through intake, compression, power (combustion), and exhaust, achieving roughly 25-35% thermal efficiency.",
+    "Reinforced concrete combines concrete's compressive strength with steel rebar's tensile strength, since concrete is strong in compression but weak in tension.",
+    "A transistor acts as a switch or amplifier; billions of them on a silicon chip form the logic gates that make up modern processors.",
+    "A bridge's load is carried by tension and compression members; suspension bridges hang the deck from cables in tension, while arch bridges carry load in compression.",
+    "Feedback control systems use sensors to measure output and adjust input; a PID controller combines proportional, integral, and derivative terms to minimize error.",
+    "Semiconductors have conductivity between conductors and insulators; doping with impurities creates n-type and p-type regions whose junctions form diodes and transistors.",
+    "Hydraulic systems transmit force through incompressible fluid; Pascal's principle lets a small force on a small piston lift a large load on a large piston.",
+    "A heat pump moves thermal energy against the temperature gradient using a refrigeration cycle, delivering more heat energy than the electrical energy it consumes.",
+    "Alternating current is used for power transmission because transformers can efficiently step voltage up for long-distance transmission and down for safe use.",
+]
+
+# ── DOMAIN 04 — PHILOSOPHY ───────────────────────────────────────────────────
+DOMAINS["PHILOSOPHY & ETHICS"] = [
+    "The trolley problem asks whether one should divert a runaway trolley to kill one person instead of five, probing the moral difference between actively causing harm and allowing it.",
+    "Kant's categorical imperative commands acting only on maxims you could will to become universal laws, and treating people always as ends in themselves, never merely as means.",
+    "Utilitarianism (Bentham, Mill) judges actions by their consequences, aiming to maximize overall happiness or well-being for the greatest number.",
+    "Deontology judges actions by adherence to duties and rules rather than outcomes; an act can be wrong even if it produces good results.",
+    "Virtue ethics (Aristotle) locates morality in character: the good life flows from cultivating virtues like courage and temperance as a mean between extremes.",
+    "Plato's allegory of the cave depicts prisoners mistaking shadows for reality, illustrating his theory that the material world is a dim copy of eternal Forms.",
+    "Descartes' 'I think, therefore I am' establishes the thinking self as the one certainty that survives radical doubt.",
+    "The is-ought problem (Hume) warns that one cannot logically derive what ought to be the case purely from statements about what is the case.",
+    "Existentialism (Sartre, Camus) holds that existence precedes essence: humans are radically free and must create their own meaning in an indifferent universe.",
+    "Epistemology asks what knowledge is; the classical account defines it as justified true belief, which Gettier's 1963 cases showed to be incomplete.",
+    "The mind-body problem questions how mental states relate to physical brain states; dualism posits two substances while physicalism holds the mind is wholly physical.",
+    "Falsificationism (Popper) holds that a theory is scientific only if it makes predictions that could in principle be proven false.",
+    "Moral relativism claims moral truths are relative to cultures or individuals, while moral realism holds that some ethical facts are objective.",
+    "The problem of evil asks how an all-powerful, all-good God could permit suffering, a central challenge in the philosophy of religion.",
+    "Social contract theory (Hobbes, Locke, Rousseau) grounds political authority in an implicit agreement among individuals to form society for mutual benefit.",
+]
+
+# ── DOMAIN 05 — RELIGION & SPIRITUALITY ──────────────────────────────────────
+DOMAINS["RELIGION & SPIRITUALITY"] = [
+    "The Five Pillars of Islam are the shahada (declaration of faith), salat (five daily prayers), zakat (almsgiving), sawm (fasting during Ramadan), and hajj (pilgrimage to Mecca).",
+    "Dharma in Hinduism is the moral and cosmic order, encompassing duty, righteousness, and the law that sustains the universe and guides each person's role.",
+    "The Four Noble Truths of Buddhism state that life involves suffering, suffering arises from craving, suffering can cease, and the Eightfold Path leads to that cessation.",
+    "Karma is the principle that intentional actions produce consequences shaping future experience, central to Hinduism, Buddhism, and Jainism.",
+    "The Ten Commandments in Judaism and Christianity include prohibitions on idolatry, murder, theft, and false witness, plus commands to honor God and parents.",
+    "Christianity centers on the belief that Jesus Christ is the son of God who died and rose to redeem humanity; the doctrine of the Trinity was formalized at the Council of Nicaea in 325 CE.",
+    "Judaism is built on a covenant between God and the people of Israel, with the Torah as sacred law and monotheism as its foundational principle.",
+    "Buddhism's concept of nirvana is the extinguishing of craving and the cycle of rebirth (samsara), achieving liberation and lasting peace.",
+    "Sikhism, founded by Guru Nanak in 1469, teaches devotion to one God, equality of all people, honest living, and selfless service (seva).",
+    "Taoism follows the Tao, the natural way of the universe, emphasizing wu wei (effortless action) and harmony with the flow of nature.",
+    "Monotheism is belief in one God (Judaism, Christianity, Islam), while polytheism recognizes many gods (ancient Greek, Hindu traditions).",
+    "Reincarnation, central to Hinduism and Buddhism, holds that the soul or consciousness is reborn into new bodies across lifetimes according to karma.",
+    "Every major mystical tradition describes a direct inner experience of the divine, from Sufism's fana to Christian contemplation to Hindu samadhi.",
+    "The concept of the soul varies: many traditions hold it is immortal and distinct from the body, while Buddhism teaches anatta, the absence of a permanent self.",
+]
+
+# ── DOMAIN 06 — ARTS & CREATIVE EXPRESSION ───────────────────────────────────
+DOMAINS["ARTS & CREATIVE EXPRESSION"] = [
+    "Chiaroscuro is the painting technique of using strong contrasts between light and dark to model three-dimensional form and create drama, mastered by Caravaggio and Rembrandt.",
+    "Sonata form has three sections: exposition (introducing two contrasting themes), development (transforming them through different keys), and recapitulation (restating them resolved in the home key).",
+    "Linear perspective, formalized by Brunelleschi in the Renaissance, creates depth on a flat surface by converging parallel lines toward a vanishing point.",
+    "The color wheel organizes hues; complementary colors sit opposite each other and create vibrant contrast, while analogous colors sit adjacent and harmonize.",
+    "Impressionism (Monet, Renoir) captured fleeting light and atmosphere with loose, visible brushstrokes, breaking from precise academic realism in the 1870s.",
+    "A musical scale divides the octave into steps; the major scale follows the pattern whole-whole-half-whole-whole-whole-half and sounds bright, while the minor sounds darker.",
+    "Counterpoint is the art of combining independent melodic lines into a coherent texture, perfected by J.S. Bach in works like the fugues.",
+    "The golden ratio (about 1.618) appears in art and architecture as a proportion many find aesthetically pleasing, from the Parthenon to Renaissance compositions.",
+    "Cubism (Picasso, Braque) fractured objects into geometric planes and showed multiple viewpoints simultaneously, rejecting single-point perspective around 1907.",
+    "A narrative's three-act structure moves through setup, confrontation, and resolution; the protagonist faces rising conflict toward a climax and denouement.",
+    "Harmony is the simultaneous sounding of notes; a major chord stacks a root, major third, and perfect fifth, while a minor chord lowers the third.",
+    "Photography exposure depends on the triangle of aperture (depth of field), shutter speed (motion), and ISO (sensitivity to light).",
+    "Sculpture techniques include carving (subtractive, from stone or wood), modeling (additive, with clay), and casting (pouring material into a mold).",
+    "Greek tragedy followed Aristotle's Poetics, using a tragic hero whose fatal flaw (hamartia) leads to a reversal of fortune and catharsis in the audience.",
+]
+
+# ── DOMAIN 07 — HUMANITIES ───────────────────────────────────────────────────
+DOMAINS["HISTORY & HUMANITIES"] = [
+    "The Western Roman Empire fell in 476 CE from a combination of pressures: barbarian invasions, military overstretch, economic decline, political instability, and the splitting of the empire.",
+    "Structuralism in linguistics (Saussure) treats language as a system of signs whose meaning comes from their differences and relationships, not from any natural link between word and thing.",
+    "The Renaissance (14th-17th century) revived classical learning, humanism, and art, beginning in Italian city-states like Florence and funded by patrons such as the Medici.",
+    "The Industrial Revolution (c. 1760-1840) shifted economies from manual and agrarian work to machine manufacturing, powered first by water and then steam.",
+    "The Enlightenment promoted reason, individual liberty, and skepticism of traditional authority, shaping the American and French Revolutions.",
+    "World War I (1914-1918) was triggered by the assassination of Archduke Franz Ferdinand and entangling alliances, introducing trench warfare and ending four empires.",
+    "World War II (1939-1945) was the deadliest conflict in history, ending with the Holocaust's exposure, the atomic bombings of Japan, and the founding of the United Nations.",
+    "The Cold War (1947-1991) was a geopolitical standoff between the US-led capitalist bloc and the Soviet-led communist bloc, marked by nuclear deterrence and proxy wars.",
+    "Ancient Egypt's civilization endured over 3,000 years along the Nile, unified around 3100 BCE, building pyramids as royal tombs and developing hieroglyphic writing.",
+    "The printing press, invented by Gutenberg around 1440, mass-produced books, spread literacy, and helped ignite the Reformation and Scientific Revolution.",
+    "Linguistics studies phonetics (sounds), syntax (sentence structure), semantics (meaning), and pragmatics (context); all human languages share deep structural universals.",
+    "The Scientific Revolution (16th-17th century) replaced Aristotelian authority with observation and experiment through figures like Copernicus, Galileo, and Newton.",
+]
+
+# ── DOMAIN 08 — SOCIAL SCIENCES ──────────────────────────────────────────────
+DOMAINS["SOCIAL SCIENCES"] = [
+    "The bystander effect is the finding that the more people present at an emergency, the less likely any individual is to help, due to diffusion of responsibility.",
+    "Cultural relativism is the principle that a culture's beliefs and practices should be understood on their own terms rather than judged against another culture's standards.",
+    "Conformity experiments by Asch showed people often agree with an obviously wrong group answer, while Milgram's obedience studies showed willingness to harm under authority.",
+    "Socialization is the lifelong process by which people internalize their society's norms, values, and roles through family, school, peers, and media.",
+    "Max Weber distinguished three types of legitimate authority: traditional (custom), charismatic (personal magnetism), and legal-rational (rules and offices).",
+    "Anthropology studies humanity holistically across cultures and time, using ethnographic fieldwork and participant observation to understand social practices.",
+    "Demographic transition theory describes how societies move from high birth and death rates to low ones as they industrialize, driving population growth then stabilization.",
+    "Social stratification ranks people in hierarchies of class, status, and power; Marx framed it as class conflict between owners and workers over the means of production.",
+    "In-group/out-group bias leads people to favor those they identify with and discriminate against outsiders, a root of prejudice and intergroup conflict.",
+    "Symbolic interactionism holds that society emerges from the meanings people create and exchange through everyday interaction and shared symbols.",
+    "Globalization integrates economies, cultures, and populations through trade, technology, and migration, producing both interdependence and cultural friction.",
+    "Survey research and controlled experiments are core social-science methods; correlation does not imply causation, and confounding variables must be controlled.",
+]
+
+# ── DOMAIN 09 — LAW & JURISPRUDENCE ──────────────────────────────────────────
+DOMAINS["LAW & JURISPRUDENCE"] = [
+    "Habeas corpus is a legal right requiring authorities to bring a detained person before a court to justify the detention, protecting against unlawful imprisonment.",
+    "Civil law resolves disputes between private parties (contracts, property, torts) with the burden of 'preponderance of the evidence,' while criminal law prosecutes offenses against the state requiring proof 'beyond a reasonable doubt.'",
+    "The presumption of innocence places the burden on the prosecution to prove guilt; the accused need not prove innocence.",
+    "Common law systems (UK, US) rely on judicial precedent (stare decisis), while civil law systems (France, Germany) rely on comprehensive written codes.",
+    "A contract requires offer, acceptance, consideration (something of value exchanged), and mutual intent to be legally bound.",
+    "Tort law lets injured parties seek compensation for harm caused by another's negligence, intentional acts, or strict liability.",
+    "Due process guarantees fair legal procedures before the state deprives someone of life, liberty, or property, enshrined in the US Fifth and Fourteenth Amendments.",
+    "Intellectual property law protects creations: patents cover inventions, copyrights cover creative works, trademarks cover brands, and trade secrets cover confidential business information.",
+    "Mens rea (guilty mind) and actus reus (guilty act) are both generally required to establish criminal liability.",
+    "International law governs relations between states through treaties, customary law, and bodies like the International Court of Justice and the UN.",
+    "Judicial review allows courts to strike down laws that conflict with the constitution, established in the US by Marbury v. Madison (1803).",
+    "The exclusionary rule bars evidence obtained through illegal searches, deterring police misconduct under the Fourth Amendment.",
+]
+
+# ── DOMAIN 10 — ECONOMICS & BUSINESS ─────────────────────────────────────────
+DOMAINS["ECONOMICS & BUSINESS"] = [
+    "Comparative advantage (Ricardo) shows that two parties both gain from trade when each specializes in what it produces at lower opportunity cost, even if one is better at everything.",
+    "Quantitative easing is a central-bank policy of buying long-term securities to inject money into the economy, lower interest rates, and encourage lending when rates are already near zero.",
+    "Supply and demand set market prices: price rises when demand exceeds supply and falls when supply exceeds demand, settling at the equilibrium where they cross.",
+    "Inflation is a sustained rise in the general price level, eroding purchasing power; central banks target around 2% and raise interest rates to cool it.",
+    "GDP measures the total value of goods and services produced in an economy; real GDP adjusts for inflation to compare across years.",
+    "Opportunity cost is the value of the next-best alternative forgone when making a choice; it underlies all economic decision-making.",
+    "A recession is typically defined as two consecutive quarters of declining GDP, marked by rising unemployment and falling output.",
+    "Fiscal policy uses government spending and taxation to influence the economy, while monetary policy uses interest rates and money supply controlled by the central bank.",
+    "Market failures like externalities, public goods, and monopolies justify government intervention; a carbon tax internalizes the external cost of pollution.",
+    "Compound interest grows wealth exponentially because interest earns interest; the rule of 72 estimates doubling time by dividing 72 by the annual percentage rate.",
+    "Diversification reduces investment risk by spreading money across uncorrelated assets, since not all will fall at once.",
+    "Elasticity measures how much quantity demanded responds to price changes; necessities are inelastic while luxuries are elastic.",
+    "Game theory analyzes strategic decisions; the prisoner's dilemma shows how rational individuals can fail to cooperate even when cooperation benefits both.",
+    "Marginal analysis guides decisions by comparing the additional benefit of one more unit against its additional cost; optimal output is where marginal cost equals marginal revenue.",
+]
+
+# ── DOMAIN 11 — EDUCATION ────────────────────────────────────────────────────
+DOMAINS["EDUCATION & LEARNING"] = [
+    "Bloom's taxonomy ranks cognitive skills from lower to higher order: remember, understand, apply, analyze, evaluate, and create.",
+    "The zone of proximal development (Vygotsky) is the gap between what a learner can do alone and what they can do with guidance, where scaffolded teaching is most effective.",
+    "Constructivism (Piaget, Vygotsky) holds that learners actively build knowledge by connecting new information to prior understanding rather than passively receiving it.",
+    "Spaced repetition improves long-term retention by reviewing material at increasing intervals, countering the forgetting curve described by Ebbinghaus.",
+    "Formative assessment monitors learning during instruction to guide teaching, while summative assessment evaluates learning at the end against a standard.",
+    "The growth mindset (Dweck) is the belief that abilities develop through effort; it predicts greater resilience and achievement than a fixed mindset.",
+    "Active recall (testing yourself) strengthens memory far more than rereading, because retrieval practice consolidates learning.",
+    "Differentiated instruction tailors content, process, and assessment to students' varied readiness, interests, and learning profiles.",
+    "Bloom's mastery learning argues most students can achieve high standards given enough time and feedback, challenging fixed-pace instruction.",
+    "Metacognition, thinking about one's own thinking, helps learners plan, monitor, and evaluate their strategies, improving self-directed learning.",
+    "Multimedia learning theory (Mayer) shows people learn better from words and pictures together than words alone, when designed to avoid cognitive overload.",
+    "Montessori education emphasizes child-led, hands-on learning in mixed-age classrooms with self-correcting materials.",
+]
+
+# ── DOMAIN 12 — MILITARY & WARFARE ───────────────────────────────────────────
+DOMAINS["MILITARY & STRATEGY"] = [
+    "Asymmetric warfare pits a weaker force against a stronger one using unconventional tactics like guerrilla raids, insurgency, and terrorism to offset conventional disadvantage.",
+    "The Battle of Midway (1942) was the turning point of the Pacific War: US codebreakers anticipated the Japanese attack and sank four carriers, crippling Japan's offensive capability.",
+    "Clausewitz argued that war is the continuation of politics by other means, always subordinate to political aims rather than an end in itself.",
+    "Combined arms doctrine integrates infantry, armor, artillery, and air power so that each compensates for the others' weaknesses.",
+    "Deterrence theory holds that a credible threat of unacceptable retaliation, especially nuclear, prevents an adversary from attacking (mutually assured destruction).",
+    "Sun Tzu's Art of War stresses winning without fighting, deception, knowing both enemy and self, and exploiting terrain and timing.",
+    "Logistics, the supply of food, fuel, ammunition, and reinforcements, often decides campaigns more than battlefield tactics.",
+    "The Blitzkrieg tactic used by Germany in 1939-1940 combined fast armored thrusts with air support to break through and encircle enemy forces.",
+    "Counterinsurgency doctrine emphasizes winning civilian support ('hearts and minds') as much as defeating fighters militarily.",
+    "Nuclear deterrence rests on second-strike capability: the ability to retaliate even after absorbing a first strike, which discourages any first strike.",
+    "The Geneva Conventions set international rules for the humane treatment of wounded soldiers, prisoners of war, and civilians during armed conflict.",
+]
+
+# ── DOMAIN 13 — AGRICULTURE & FOOD SYSTEMS ───────────────────────────────────
+DOMAINS["AGRICULTURE & FOOD"] = [
+    "Crop rotation alternates the crops grown in a field across seasons to break pest and disease cycles and restore soil nutrients, especially by rotating nitrogen-fixing legumes with heavy feeders.",
+    "Nitrogen fixation in legumes occurs via symbiotic Rhizobium bacteria in root nodules that convert atmospheric N2 into ammonia plants can use, reducing fertilizer needs.",
+    "Photoperiodism causes many crops to flower in response to day length, which determines planting timing and regional suitability.",
+    "The Green Revolution of the mid-20th century dramatically raised yields through high-yield crop varieties, irrigation, fertilizers, and pesticides, averting predicted famines.",
+    "Soil fertility depends on nitrogen, phosphorus, and potassium plus organic matter; overworking soil without replenishment leads to degradation and erosion.",
+    "Integrated pest management combines biological controls, crop rotation, and targeted pesticide use to limit pests while reducing chemical reliance.",
+    "Irrigation accounts for roughly 70% of global freshwater withdrawals; drip irrigation delivers water directly to roots, cutting waste compared to flooding.",
+    "Selective breeding over millennia transformed wild plants and animals into modern crops and livestock, long before genetic engineering accelerated the process.",
+    "Photosynthesis efficiency, soil health, water, and climate set the ceiling on crop yields; precision agriculture uses sensors and GPS to optimize each input.",
+    "Food preservation methods, drying, salting, fermenting, canning, refrigeration, and freezing, slow microbial growth and enzymatic spoilage.",
+    "Monoculture maximizes short-term efficiency but increases vulnerability to pests, disease, and soil depletion compared to diversified polyculture.",
+]
+
+# ── DOMAIN 14 — ENVIRONMENTAL SCIENCE & SUSTAINABILITY ───────────────────────
+DOMAINS["ENVIRONMENT & SUSTAINABILITY"] = [
+    "Eutrophication occurs when excess nutrients, often nitrogen and phosphorus from fertilizer runoff, trigger algal blooms that deplete oxygen as they decay, creating dead zones that kill aquatic life.",
+    "The greenhouse effect warms the planet as gases like CO2, methane, and water vapor absorb outgoing infrared radiation and re-emit it back toward the surface.",
+    "The carbon cycle moves carbon among the atmosphere, oceans, soil, and living things; burning fossil fuels releases stored carbon faster than natural sinks can absorb it.",
+    "Biodiversity loss reduces ecosystem resilience; the current extinction rate is estimated at 100 to 1,000 times the natural background rate, driven by habitat loss.",
+    "Ocean acidification happens as seawater absorbs CO2 and forms carbonic acid, lowering pH and harming shell-forming organisms like corals and plankton.",
+    "Renewable energy from solar, wind, hydro, and geothermal sources produces electricity without burning fossil fuels; solar and wind costs fell roughly 90% and 70% in the 2010s.",
+    "The ozone layer absorbs harmful ultraviolet radiation; the 1987 Montreal Protocol phased out CFCs and the ozone hole is slowly recovering.",
+    "Ecosystem services include pollination, water purification, climate regulation, and soil formation, providing trillions of dollars of value humans rarely pay for directly.",
+    "Deforestation, especially of tropical rainforests, releases stored carbon, destroys habitat, and disrupts rainfall patterns and the water cycle.",
+    "The circular economy replaces the take-make-waste model with reuse, repair, and recycling to keep materials in use and minimize waste.",
+    "Planetary boundaries define safe limits for processes like climate, biodiversity, and nitrogen cycles; crossing them risks abrupt, irreversible environmental change.",
+    "Climate change is driven mainly by rising atmospheric CO2 from fossil fuels; consequences include sea-level rise, more extreme weather, and shifting ecosystems.",
+]
+
+# ── DOMAIN 15 — COMMUNICATION & MEDIA ────────────────────────────────────────
+DOMAINS["COMMUNICATION & MEDIA"] = [
+    "The Shannon-Weaver model frames communication as a source encoding a message, sending it through a channel subject to noise, to a receiver who decodes it.",
+    "The spiral of silence theory (Noelle-Neumann) holds that people stay quiet about views they believe are unpopular, making the dominant opinion appear stronger than it is.",
+    "Agenda-setting theory says the media does not tell people what to think but is highly effective at telling them what to think about.",
+    "Marshall McLuhan's phrase 'the medium is the message' argues that the form of a medium shapes society more than the content it carries.",
+    "Framing shapes interpretation by emphasizing certain aspects of an issue; the same fact can read very differently depending on how it is presented.",
+    "Propaganda uses emotional appeals, repetition, and selective information to shape attitudes, distinguished from journalism by its intent to persuade rather than inform.",
+    "The two-step flow model shows that media influence often passes through opinion leaders who interpret and relay messages to their networks.",
+    "Confirmation bias and algorithmic filtering create echo chambers and filter bubbles, where people mostly encounter views that reinforce their own.",
+    "Nonverbal communication, including body language, tone, and facial expression, often conveys more emotional meaning than the words spoken.",
+    "Cultivation theory argues that heavy television viewing gradually shapes viewers' perception of reality to match the world depicted on screen.",
+    "Deepfakes use AI to fabricate realistic video and audio, eroding trust in recorded evidence and raising new challenges for verifying information.",
+]
+
+# ── DOMAIN 16 — SPORTS & PHYSICAL CULTURE ────────────────────────────────────
+DOMAINS["SPORTS & PHYSICAL CULTURE"] = [
+    "VO2 max is the maximum rate at which the body can use oxygen during intense exercise; it is the leading measure of aerobic fitness and improves with endurance training.",
+    "The offside rule in soccer penalizes an attacker who is nearer the opponent's goal line than both the ball and the second-to-last defender when the ball is played to them.",
+    "Muscle hypertrophy is the growth of muscle fibers from progressive resistance training, driven by mechanical tension, metabolic stress, and adequate protein and recovery.",
+    "Aerobic exercise uses oxygen to sustain prolonged activity, while anaerobic exercise relies on stored energy for short, intense bursts and produces lactate.",
+    "High-intensity interval training (HIIT) alternates hard efforts with recovery, improving cardiovascular fitness efficiently in less time than steady-state cardio.",
+    "Periodization structures training into cycles of varying intensity and volume to peak performance and avoid overtraining.",
+    "The body fuels exercise through three systems: the phosphocreatine system for seconds, glycolysis for minutes, and aerobic metabolism for sustained effort.",
+    "Delayed onset muscle soreness (DOMS) appears 24-72 hours after unfamiliar exercise from microscopic muscle damage and subsequent repair.",
+    "Proper hydration and electrolyte balance are critical for performance; dehydration of even 2% of body weight measurably reduces endurance.",
+    "Biomechanics analyzes movement to improve technique and reduce injury, studying forces, levers, and joint angles in athletic motion.",
+]
+
+# ── DOMAIN 17 — GOVERNANCE & POLITICAL SYSTEMS ───────────────────────────────
+DOMAINS["GOVERNANCE & POLITICS"] = [
+    "Separation of powers (Montesquieu) divides government into legislative, executive, and judicial branches so each checks the others and prevents concentration of power.",
+    "Proportional representation allocates legislative seats in proportion to vote share, producing multi-party systems, while first-past-the-post tends toward two dominant parties.",
+    "Democracy vests power in the people through free elections, rule of law, and protected civil liberties; liberal democracy adds constitutional limits on majority power.",
+    "Authoritarian regimes concentrate power without genuine elections, maintaining control through repression, propaganda, and co-optation of elites.",
+    "Federalism divides authority between a central government and regional units, allowing local self-rule within a shared national framework.",
+    "A constitution is the supreme law defining government structure, powers, and citizens' rights; it can be codified in one document or, as in the UK, uncodified.",
+    "Checks and balances let each branch limit the others, such as legislative power to pass laws, executive power to veto, and judicial power to review.",
+    "Political legitimacy is the popular acceptance of an authority's right to rule; it rests on tradition, law, performance, or charismatic leadership.",
+    "Bureaucracy administers policy through hierarchical, rule-based organizations; Weber saw it as efficient but warned of rigidity and the 'iron cage.'",
+    "Populism frames politics as a struggle between a virtuous 'people' and a corrupt 'elite,' and can arise on both the left and right.",
+    "The social contract grounds the state's authority in the consent of the governed, who trade some freedom for security and order.",
+]
+
+# ── DOMAIN 18 — PSYCHOLOGY OF HUMAN EXPERIENCE ───────────────────────────────
+DOMAINS["PSYCHOLOGY & MIND"] = [
+    "Cognitive dissonance (Festinger) is the mental discomfort of holding contradictory beliefs or acting against one's values, which people resolve by changing attitudes or rationalizing.",
+    "Maslow's hierarchy of needs ascends from physiological needs to safety, belonging, esteem, and finally self-actualization, proposing lower needs are met before higher ones.",
+    "Classical conditioning (Pavlov) pairs a neutral stimulus with a meaningful one until the neutral stimulus alone triggers the response, as a bell triggered salivation in dogs.",
+    "Operant conditioning (Skinner) shapes behavior through reinforcement that increases it and punishment that decreases it.",
+    "The fight-or-flight response floods the body with adrenaline and cortisol to prepare for threat, accelerating heart rate and sharpening focus.",
+    "Attachment theory (Bowlby, Ainsworth) describes how early bonds with caregivers shape secure, anxious, or avoidant relationship patterns into adulthood.",
+    "The big five personality traits are openness, conscientiousness, extraversion, agreeableness, and neuroticism, each on a continuous spectrum.",
+    "Depression involves persistent low mood, loss of interest, and disrupted sleep and appetite, linked to neurotransmitter and neural-circuit dysregulation.",
+    "Memory has sensory, short-term (working), and long-term stores; consolidation transfers experiences into durable long-term memory, largely during sleep.",
+    "The placebo effect produces real physiological improvement from an inert treatment because of expectation, showing the mind's influence on the body.",
+    "Defense mechanisms (Freud) like repression, denial, and projection unconsciously protect the ego from anxiety and uncomfortable truths.",
+    "Flow is a state of complete absorption in a challenging but achievable task, described by Csikszentmihalyi as optimal experience.",
+]
+
+# ── DOMAIN 19 — CRAFT & TRADITIONAL SKILLS ───────────────────────────────────
+DOMAINS["CRAFT & TRADITIONAL SKILLS"] = [
+    "Damascus steel was a legendary blade material made from wootz steel, prized for its wavy pattern, sharpness, and toughness; the original technique was lost and modern pattern-welded 'Damascus' folds layered steels to mimic it.",
+    "Mortise and tenon joinery fits a projecting tenon on one piece into a matching mortise cavity in another, creating a strong, ancient woodworking joint often locked with a peg.",
+    "The dovetail joint interlocks angled pins and tails so the connection resists being pulled apart, prized in drawer and cabinet making.",
+    "Blacksmithing shapes iron and steel by heating to a malleable orange-hot state and hammering; quenching hardens the metal and tempering restores toughness.",
+    "Pottery is shaped from clay then fired in a kiln; earthenware fires around 1000 C, stoneware around 1200 C, and porcelain around 1300 C, each denser and harder.",
+    "Hand weaving interlaces perpendicular warp and weft threads on a loom; the pattern of over-and-under crossings determines the fabric's structure and strength.",
+    "Tanning preserves animal hide into leather by treating it with tannins or chromium salts that stop decay and make it flexible and durable.",
+    "Traditional masonry stacks stone or brick bonded with mortar; the arch carries load in compression, letting builders span openings without a lintel.",
+    "Glassblowing shapes molten glass gathered on a blowpipe by inflating and tooling it while it is soft, exploiting glass's transition between solid and liquid.",
+    "Knife sharpening removes metal at a consistent angle (typically 15-20 degrees per side) to form a fine edge, then hones away the burr.",
+]
+
+# ── DOMAIN 20 — METAPHYSICS, MYSTICISM & OCCULT SCIENCES ──────────────────────
+DOMAINS["METAPHYSICS & MYSTICISM"] = [
+    "The Hermetic principle of correspondence, summarized as 'as above, so below,' holds that patterns repeat across all scales, so the macrocosm mirrors the microcosm.",
+    "Qi (chi) in Chinese philosophy and medicine is the vital life-force energy believed to flow through the body along meridians; balancing its flow is the aim of acupuncture and qigong.",
+    "The Kybalion (1908) presents seven Hermetic principles: mentalism, correspondence, vibration, polarity, rhythm, cause and effect, and gender.",
+    "Alchemy sought to transmute base metals into gold and find the philosopher's stone; symbolically it represented spiritual transformation and laid groundwork for chemistry.",
+    "Astrology interprets the positions of celestial bodies as influences on human affairs; it is a historical cosmological system, not supported by controlled scientific testing.",
+    "The chakra system in yogic tradition describes seven energy centers along the spine, each linked to physical, emotional, and spiritual functions.",
+    "Meditation traditions across cultures aim to quiet mental chatter and reach states of heightened awareness, presence, or union with the divine.",
+    "Esoteric traditions distinguish exoteric (outer, public) teachings from esoteric (inner, hidden) knowledge reserved for initiates.",
+    "The concept of the akashic records describes a proposed cosmic archive of all events and thoughts, a mystical rather than empirical claim.",
+    "Sacred geometry sees mathematical patterns like the Flower of Life and golden ratio as expressions of underlying cosmic order in many spiritual traditions.",
+]
+
+# ── DOMAIN 21 — TRANSPORTATION & LOGISTICS ───────────────────────────────────
+DOMAINS["TRANSPORTATION & LOGISTICS"] = [
+    "Just-in-time logistics minimizes inventory by delivering materials exactly when needed in production, cutting storage costs but increasing vulnerability to supply disruptions.",
+    "A supply chain links raw materials, manufacturing, distribution, and retail; bottlenecks anywhere ripple through the whole system (the bullwhip effect amplifies demand swings upstream).",
+    "Containerization standardized shipping into intermodal steel boxes, slashing loading time and cost and enabling the modern globalized economy since the 1950s.",
+    "An aircraft generates lift because its wing shape and angle deflect air downward; by Newton's third law the air pushes the wing up, aided by lower pressure over the curved upper surface.",
+    "Last-mile delivery, the final step to the customer's door, is often the most expensive and inefficient part of shipping, around half of total delivery cost.",
+    "Rail moves freight with very low energy per ton-mile because steel wheels on steel rails have minimal rolling resistance, making it efficient for bulk goods.",
+    "GPS navigation works by trilateration: a receiver calculates its position from the timing of signals from at least four satellites.",
+    "Traffic flow theory shows that congestion can arise spontaneously from small disturbances amplifying through dense traffic, even without an accident.",
+    "Electric vehicles convert over 85% of battery energy to motion versus about 25-35% for combustion engines, and have far fewer moving parts.",
+    "Logistics optimization solves routing problems like the traveling salesman problem to minimize distance, time, and fuel across many delivery stops.",
+]
+
+# ── DOMAIN 22 — ENERGY SYSTEMS ───────────────────────────────────────────────
+DOMAINS["ENERGY SYSTEMS"] = [
+    "A nuclear reactor generates electricity by using controlled fission of uranium-235 to heat water into steam, which spins a turbine connected to a generator.",
+    "The Betz limit proves a wind turbine can extract at most 59.3% of the kinetic energy in the wind passing through its rotor, because the air must keep moving to leave.",
+    "Solar photovoltaic cells convert sunlight directly to electricity via the photovoltaic effect, where photons knock electrons loose in a semiconductor junction.",
+    "The electrical grid must match supply and demand instantaneously; storage like pumped hydro and batteries buffers the mismatch as variable renewables grow.",
+    "Fossil fuels (coal, oil, gas) store ancient solar energy in chemical bonds; burning them releases that energy plus CO2, the main driver of climate change.",
+    "Nuclear fusion fuses light nuclei like deuterium and tritium, releasing far more energy than fission with little long-lived waste, but requires sustaining over 100 million Kelvin.",
+    "Energy cannot be created or destroyed, only converted (first law of thermodynamics); every conversion loses some usable energy as waste heat (second law).",
+    "Pumped-storage hydropower pumps water uphill when power is cheap and releases it through turbines at peak demand, providing about 95% of global grid storage.",
+    "A battery stores energy chemically and releases it as direct current; lithium-ion cells offer high energy density (150-250 Wh/kg) and power most modern electronics.",
+    "Geothermal energy taps Earth's internal heat to generate electricity or heat buildings, reliable as a baseload source where the geology permits.",
+    "Grid parity is reached when a renewable source produces electricity at or below the cost of conventional power; solar and wind crossed it in most markets in the 2010s.",
+]
+
+# ── DOMAIN 23 — SOCIAL MOVEMENTS & ACTIVISM ──────────────────────────────────
+DOMAINS["SOCIAL MOVEMENTS & ACTIVISM"] = [
+    "Civil disobedience is the deliberate, nonviolent breaking of unjust laws to provoke change and accept the legal consequences, theorized by Thoreau and practiced by Gandhi and King.",
+    "The Stonewall riots of June 1969 in New York, sparked by a police raid on a gay bar, catalyzed the modern LGBTQ rights movement and the first Pride marches.",
+    "Gandhi's satyagraha combined nonviolent resistance with mass civil disobedience to challenge British colonial rule in India.",
+    "The US civil rights movement used boycotts, sit-ins, marches, and legal challenges to dismantle segregation, achieving the Civil Rights Act of 1964 and Voting Rights Act of 1965.",
+    "The 19th Amendment (1920) granted American women the right to vote after a decades-long suffrage movement of organizing, protest, and lobbying.",
+    "Labor movements won the eight-hour workday, the weekend, child-labor bans, and workplace safety laws through strikes, unions, and collective bargaining.",
+    "Social movements typically progress through emergence, coalescence, bureaucratization, and decline or institutionalization.",
+    "Nonviolent resistance has historically been roughly twice as likely to succeed as armed struggle, partly by attracting broader participation (research by Chenoweth and Stephan).",
+    "Collective action faces the free-rider problem: individuals may benefit from a movement's success without contributing, which organizers overcome through solidarity and selective incentives.",
+    "The abolitionist movement of the 18th-19th centuries combined moral argument, slave narratives, and political pressure to end the transatlantic slave trade and slavery.",
+]
+
+# ── DOMAIN 24 — COGNITIVE & BEHAVIORAL SCIENCES ──────────────────────────────
+DOMAINS["COGNITIVE SCIENCE"] = [
+    "Working memory holds and manipulates a small amount of information briefly; its capacity averages about four chunks, the bottleneck of conscious reasoning.",
+    "Confirmation bias is the tendency to seek, interpret, and remember information that supports existing beliefs while discounting contradictory evidence.",
+    "Dual-process theory (Kahneman) distinguishes System 1, fast and intuitive, from System 2, slow and deliberate; most errors come from over-relying on System 1.",
+    "Heuristics are mental shortcuts that usually work but cause predictable biases, such as the availability heuristic judging likelihood by how easily examples come to mind.",
+    "Loss aversion means losses feel roughly twice as painful as equivalent gains feel good, shaping risk-taking and economic decisions.",
+    "Anchoring bias causes initial numbers to skew later judgments, even when the anchor is arbitrary and irrelevant.",
+    "The Dunning-Kruger effect describes how people with low competence in a domain tend to overestimate their ability because they lack the skill to recognize their errors.",
+    "Neuroplasticity is the brain's ability to reorganize by forming new neural connections, enabling learning and recovery after injury.",
+    "Attention is selective and limited; the cocktail-party effect lets us focus on one voice in a crowd, but multitasking degrades performance on each task.",
+    "Theory of mind, the ability to attribute mental states to others, develops around age four and is central to social understanding and empathy.",
+    "Priming occurs when exposure to one stimulus unconsciously influences the response to a later one, showing how much cognition runs below awareness.",
+]
+
+# ── DOMAIN 25 — SPACE EXPLORATION & ASTRONAUTICS ─────────────────────────────
+DOMAINS["SPACE EXPLORATION"] = [
+    "A Hohmann transfer orbit is the most fuel-efficient maneuver between two circular orbits, using two engine burns to ride an elliptical path tangent to both.",
+    "Astronauts experience muscle atrophy and bone density loss of about 1% per month in microgravity because their bodies no longer work against gravity; exercise mitigates it.",
+    "Orbital velocity for low Earth orbit is about 7.8 km/s; reaching it, not altitude, is what makes spaceflight hard, since orbit means falling around Earth fast enough to miss it.",
+    "A rocket works by Newton's third law, expelling high-speed exhaust to gain forward momentum; the rocket equation links velocity change to exhaust speed and the fuel-to-mass ratio.",
+    "Escape velocity from Earth is about 11.2 km/s, the speed needed to break free of Earth's gravity without further propulsion.",
+    "The Apollo program landed twelve astronauts on the Moon between 1969 and 1972, with Apollo 11's Armstrong and Aldrin the first in July 1969.",
+    "Reusable rockets, pioneered by SpaceX's Falcon 9 landing its first stage, cut launch costs dramatically by reusing the most expensive hardware.",
+    "The James Webb Space Telescope observes in infrared from the Sun-Earth L2 point, seeing the earliest galaxies and peering through dust that blocks visible light.",
+    "Voyager 1, launched in 1977, is the most distant human-made object and has entered interstellar space beyond the Sun's heliosphere.",
+    "Gravity assists (slingshots) use a planet's motion to accelerate a spacecraft without fuel, redirecting and speeding probes toward distant targets.",
+    "The International Space Station orbits about 400 km up at 28,000 km/h, circling Earth roughly every 90 minutes as a microgravity research lab.",
+]
+
+# ── DOMAIN 26 — INTERDISCIPLINARY & EMERGING DOMAINS ─────────────────────────
+DOMAINS["EMERGING & INTERDISCIPLINARY"] = [
+    "CRISPR-Cas9 gene editing uses a guide RNA to target a precise DNA sequence and the Cas9 enzyme to cut it, letting scientists disable or rewrite genes cheaply and accurately.",
+    "Quantum supremacy is the point at which a quantum computer performs a calculation infeasible for any classical computer; Google claimed it in 2019 for a narrow sampling task.",
+    "Artificial intelligence systems learn patterns from data; large language models predict the next token over vast text, producing fluent language without explicit rules.",
+    "Nanotechnology manipulates matter at the scale of atoms and molecules (1-100 nm), where quantum effects and huge surface-area ratios create novel properties.",
+    "Synthetic biology designs and builds new biological parts and systems, treating DNA as programmable code to engineer organisms for medicine, fuel, and materials.",
+    "Blockchain is a distributed, append-only ledger secured by cryptographic hashing; proof-of-work or proof-of-stake consensus makes tampering computationally costly.",
+    "Brain-computer interfaces translate neural activity into commands, letting users control devices by thought, with applications in paralysis and prosthetics.",
+    "Bioinformatics applies computing to biological data, enabling genome sequencing analysis, protein structure prediction (as in AlphaFold), and drug discovery.",
+    "Complexity science studies how simple components produce emergent collective behavior, from flocking birds to markets to neural networks.",
+    "Quantum computing uses qubits that exist in superposition and entanglement, enabling certain problems like factoring (Shor's algorithm) to be solved exponentially faster.",
+]
+
+# ── DOMAIN 27 — HUMAN DEVELOPMENT & LIFE STAGES ──────────────────────────────
+DOMAINS["HUMAN DEVELOPMENT"] = [
+    "Object permanence, the understanding that objects continue to exist when out of sight, develops in infants around 8 months, a milestone in Piaget's sensorimotor stage.",
+    "Erikson's eight psychosocial stages each pose a conflict to resolve, from trust vs. mistrust in infancy to integrity vs. despair in old age.",
+    "Piaget's four stages of cognitive development are sensorimotor, preoperational, concrete operational, and formal operational, each marked by new reasoning abilities.",
+    "Language acquisition follows a universal sequence (cooing, babbling, first words, two-word phrases) and a critical period in early childhood for native fluency.",
+    "Adolescence involves major brain remodeling; the prefrontal cortex governing judgment matures into the mid-twenties, later than the emotional limbic system.",
+    "Attachment in infancy (secure, anxious, avoidant) shapes how children regulate emotion and form relationships throughout life.",
+    "Puberty is driven by hormonal cascades that trigger physical maturation and reproductive capability, varying widely in timing across individuals.",
+    "Aging brings gradual declines in muscle mass, sensory acuity, and processing speed, though crystallized knowledge and vocabulary often remain stable or grow.",
+    "Nature and nurture interact throughout development; genes set ranges of potential that environment and experience shape via epigenetic mechanisms.",
+    "Kohlberg's stages of moral development progress from obedience-based to social-contract to universal-principle reasoning.",
+    "Secure early relationships and responsive caregiving build the foundation for emotional regulation, resilience, and healthy social development.",
+]
+
+# ── DOMAIN 28 — INFORMATION & KNOWLEDGE SYSTEMS ──────────────────────────────
+DOMAINS["INFORMATION & KNOWLEDGE SYSTEMS"] = [
+    "Information entropy (Shannon) measures the average uncertainty or surprise in a message; it sets the theoretical minimum number of bits needed to encode data.",
+    "A knowledge graph stores facts as a network of entities (nodes) and relationships (edges), letting machines reason over connections, as in search engines and recommendation systems.",
+    "A database index speeds queries by maintaining a sorted structure (often a B-tree) that avoids scanning every row, trading extra storage and write cost for read speed.",
+    "Data compression removes redundancy; lossless methods (ZIP, PNG) reconstruct the original exactly, while lossy methods (JPEG, MP3) discard imperceptible detail for smaller size.",
+    "Metadata is data about data, such as a file's author, date, and format; it makes information searchable, organizable, and interpretable.",
+    "The semantic web uses standards like RDF and OWL to give data machine-readable meaning so software can integrate and reason across sources.",
+    "Library classification systems like Dewey Decimal and Library of Congress organize knowledge hierarchically so any work has a findable, logical location.",
+    "Search engines rank pages by relevance and authority; PageRank scored a page by the number and quality of links pointing to it.",
+    "Information retrieval matches queries to documents using techniques like TF-IDF, which weights terms by how frequent they are in a document but rare across the collection.",
+    "Cryptographic hashing maps any input to a fixed-size fingerprint that is fast to compute but practically impossible to reverse or forge, underpinning data integrity.",
+    "Open data and FAIR principles (Findable, Accessible, Interoperable, Reusable) aim to make knowledge maximally useful to both humans and machines.",
+]
+
+# ── DOMAIN 29 — ETHICS, RIGHTS & JUSTICE SYSTEMS ─────────────────────────────
+DOMAINS["ETHICS, RIGHTS & JUSTICE"] = [
+    "Deontology judges actions by whether they follow moral rules and duties regardless of outcome, while consequentialism judges them solely by their results; the two often conflict in hard cases.",
+    "Restorative justice focuses on repairing harm by bringing together victims, offenders, and community to address needs and accountability, rather than mere punishment; it tends to reduce reoffending.",
+    "Human rights are universal entitlements held by all people simply by being human, codified in the 1948 Universal Declaration of Human Rights.",
+    "Retributive justice holds that punishment should be proportional to the crime, paying back wrongdoing, in contrast to rehabilitative or restorative aims.",
+    "Distributive justice concerns the fair allocation of resources; Rawls argued inequalities are just only if they benefit the least advantaged (the difference principle).",
+    "Procedural justice holds that fair processes, transparency, voice, and impartiality, are essential to legitimacy, often mattering as much as outcomes.",
+    "The presumption of innocence and the right to a fair trial are cornerstones of just legal systems, protecting individuals against arbitrary state power.",
+    "Negative rights protect against interference (free speech, freedom from torture), while positive rights entitle people to provisions (education, healthcare).",
+    "Civil liberties protect individuals from government overreach, while civil rights protect against discrimination by government or others.",
+    "Justice as fairness (Rawls) imagines choosing society's rules behind a 'veil of ignorance,' not knowing your own position, to ensure impartial principles.",
+    "Wrongful convictions, revealed by DNA exonerations, expose flaws like mistaken eyewitness identification and coerced confessions in justice systems.",
+]
+
+# ── DOMAIN 30 — SURVIVAL, PRIMAL & ANCESTRAL SKILLS ──────────────────────────
+DOMAINS["SURVIVAL & ANCESTRAL SKILLS"] = [
+    "To purify water in the wild, boiling for at least one minute kills pathogens; filtration removes particles and many microbes, and chemical treatment with iodine or chlorine disinfects.",
+    "A debris hut shelter is built by leaning branches against a ridgepole and piling a thick layer of leaves and debris for insulation, trapping body heat in cold conditions.",
+    "The survival rule of threes: a person can generally last about three minutes without air, three hours without shelter in harsh weather, three days without water, and three weeks without food.",
+    "Fire by friction (bow drill) generates an ember by spinning a spindle against a fireboard; the ember is transferred to a tinder bundle and gently blown into flame.",
+    "Prioritizing survival needs in order, shelter, water, fire, then food, prevents fatal mistakes like exhausting energy hunting while dying of exposure.",
+    "Navigation without a compass uses the sun (rising east, setting west), the shadow-stick method, and at night the North Star found via the Big Dipper.",
+    "Foraging safely requires positive identification, since many edible plants have toxic look-alikes; the universal edibility test reduces but never eliminates risk.",
+    "Hypothermia sets in when core temperature drops; staying dry, insulated from the ground, and out of wind is critical, as wet clothing draws heat away rapidly.",
+    "Wilderness first aid prioritizes stopping severe bleeding with direct pressure, maintaining an airway, and preventing shock by keeping the casualty warm and calm.",
+    "Flint and steel or a ferrocerium rod throw sparks into tinder to start fire reliably even in damp conditions, a core ancestral and modern survival skill.",
+    "Trapping and fishing yield more calories per unit of energy than active hunting, which is why ancestral survival relied heavily on passive food-gathering methods.",
+]
+
+# ── High-frequency everyday-science questions (common gaps) ──────────────────
+DOMAINS["EVERYDAY SCIENCE"] = [
+    "The sky is blue because air molecules scatter shorter blue wavelengths of sunlight more strongly than longer red wavelengths, a phenomenon called Rayleigh scattering.",
+    "Sunsets are red and orange because when the Sun is low, light travels through more atmosphere, scattering away the blue and leaving the longer red and orange wavelengths.",
+    "Grass and most plants are green because chlorophyll absorbs red and blue light for photosynthesis and reflects green light back to our eyes.",
+    "A rainbow forms when sunlight enters raindrops, refracts, reflects off the back, and refracts again, splitting white light into its spectrum of colors.",
+    "Ice floats because water expands when it freezes, making solid ice about 9% less dense than liquid water, unusual among substances.",
+    "We sleep to consolidate memory, clear metabolic waste from the brain, restore energy, and regulate hormones; chronic sleep loss harms cognition and health.",
+    "Lightning is a massive electrostatic discharge between charged regions of clouds or cloud and ground; thunder is the sound of air explosively heated by the bolt.",
+    "Why we yawn is not fully settled, but leading explanations include cooling the brain and increasing alertness during transitions in arousal.",
+    "Metals feel colder than wood at the same temperature because metal conducts heat away from your skin much faster, not because it is actually colder.",
+    "The seasons are caused by Earth's 23.5-degree axial tilt changing the angle and length of sunlight, not by distance from the Sun.",
+    "Sound travels about 343 m/s in air but roughly four times faster in water and even faster in solids, because tightly packed particles transmit vibrations more efficiently.",
+    "Caffeine works by blocking adenosine receptors in the brain, preventing the drowsiness signal adenosine normally produces.",
+]
+
+print(f"[batch 3] total domains: {len(DOMAINS)}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MERGE LOGIC
+# ──────────────────────────────────────────────────────────────────────────────
+def main() -> None:
+    total_facts = sum(len(v) for v in DOMAINS.values())
+    print(f"Generated {total_facts} high-quality facts across {len(DOMAINS)} domains.")
+
+    # 1. Write standalone taxonomy knowledge file
+    tax_path = DATA / "taxonomy_knowledge.json"
+    with open(tax_path, "w", encoding="utf-8") as f:
+        json.dump(DOMAINS, f, indent=2, ensure_ascii=False)
+    print(f"Wrote {tax_path}")
+
+    # 2. Merge into the main corpus (dedup by exact-text, case-insensitive)
+    corpus_path = DATA / "corpus_knowledge.json"
+    with open(corpus_path, encoding="utf-8") as f:
+        corpus = json.load(f)
+
+    existing_texts = set()
+    for facts in corpus.values():
+        for fact in facts:
+            existing_texts.add(fact.strip().lower())
+
+    added = 0
+    for domain, facts in DOMAINS.items():
+        bucket = corpus.setdefault(domain, [])
+        for fact in facts:
+            key = fact.strip().lower()
+            if key not in existing_texts:
+                bucket.append(fact)
+                existing_texts.add(key)
+                added += 1
+
+    with open(corpus_path, "w", encoding="utf-8") as f:
+        json.dump(corpus, f, indent=2, ensure_ascii=False)
+
+    new_total = sum(len(v) for v in corpus.values())
+    print(f"Merged {added} new facts into corpus_knowledge.json")
+    print(f"Corpus now holds {new_total} curated facts across {len(corpus)} domain buckets.")
+
+
+if __name__ == "__main__":
+    main()
